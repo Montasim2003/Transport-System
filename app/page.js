@@ -1,601 +1,466 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { loginUser, registerStudent } from '@/lib/auth';
 import {
-  Mail,
-  Lock,
-  User,
-  IdCard,
-  KeyRound,
-  X,
-  AlertCircle,
-  CheckCircle2,
-  Menu,
+  Bus, ShieldCheck, GraduationCap, Navigation, Radio, Lock,
+  Mail, KeyRound, Eye, EyeOff, AlertCircle
 } from 'lucide-react';
+import ThemeToggle from '@/components/ThemeToggle';
+import { getSession, getDashboardPath, loginUser, registerUser } from '@/lib/auth';
+import { getDatabaseMode } from '@/lib/supabase';
 
-export default function AuthLandingPage() {
-  const [isPopupOpen, setIsPopupOpen] = useState(true);
-  const [isRegisterMode, setIsRegisterMode] = useState(false);
-  const [activeNavInfo, setActiveNavInfo] = useState(null);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+const ROLES = [
+  { id: 'student', label: 'Student', icon: GraduationCap },
+  { id: 'driver', label: 'Driver', icon: Navigation },
+  { id: 'controller', label: 'Controller', icon: Radio },
+  { id: 'admin', label: 'Admin', icon: ShieldCheck },
+];
 
-  // লগইন স্টেট
-  const [loginEmail, setLoginEmail] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-
-  // রেজিস্ট্রেশন স্টেট
-  const [regName, setRegName] = useState('');
-  const [regUniId, setRegUniId] = useState('');
-  const [regEmail, setRegEmail] = useState('');
-  const [regCode, setRegCode] = useState('');
-  const [regPassword, setRegPassword] = useState('');
-  const [agreeTerms, setAgreeTerms] = useState(false);
-
-  const [loading, setLoading] = useState(false);
-  const [feedback, setFeedback] = useState({ type: '', text: '' });
+export default function AuthPortalPage() {
   const router = useRouter();
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [regRole, setRegRole] = useState('student');
+  const [showPass, setShowPass] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleLoginSubmit = async (e) => {
+  // Login State
+  const [identifier, setIdentifier] = useState('');
+  const [password, setPassword] = useState('');
+
+  // Multi-Role Registration State
+  const [form, setForm] = useState({
+    verification_code: '',
+    name: '',
+    uni_id: '',
+    email: '',
+    phone: '',
+    password: '',
+    department: 'SWE',
+    batch: '',
+    guardian_phone: '',
+    license_no: '',
+    helper_name: '',
+    helper_phone: '',
+    home_address: '',
+  });
+
+  // Persistent Auto-Login: Redirect directly to user's dashboard unless they clicked Logout
+  useEffect(() => {
+    const existing = getSession();
+    if (existing?.role) {
+      router.replace(getDashboardPath(existing.role));
+      return;
+    }
+    setCheckingSession(false);
+  }, [router]);
+
+  const handleLogin = async (e) => {
     e.preventDefault();
-    setFeedback({ type: '', text: '' });
+    setError('');
     setLoading(true);
-
-    const res = await loginUser(loginEmail, loginPassword);
-
-    if (!res.success) {
-      setFeedback({ type: 'error', text: res.message });
-      setLoading(false);
+    const { user, error: err } = await loginUser(identifier, password);
+    setLoading(false);
+    if (err || !user) {
+      setError(err || 'Login failed');
       return;
     }
-
-    localStorage.setItem('transport_user', JSON.stringify(res.user));
-    const role = res.user.role;
-    if (role === 'student') router.push('/student');
-    else if (role === 'driver') router.push('/driver');
-    else if (role === 'controller') router.push('/controller');
-    else if (role === 'admin') router.push('/admin');
+    router.replace(getDashboardPath(user.role));
   };
 
-  const handleRegisterSubmit = async (e) => {
+  const handleRegister = async (e) => {
     e.preventDefault();
-    setFeedback({ type: '', text: '' });
-
-    if (!agreeTerms) {
-      setFeedback({ type: 'error', text: 'শর্তাবলীতে (Terms & Conditions) টিক চিহ্ন দাও।' });
-      return;
-    }
-
+    setError('');
     setLoading(true);
-    const res = await registerStudent({
-      name: regName,
-      uniId: regUniId,
-      email: regEmail,
-      paymentCode: regCode,
-      password: regPassword,
-    });
-
-    if (!res.success) {
-      setFeedback({ type: 'error', text: res.message });
-      setLoading(false);
+    const { user, error: err } = await registerUser({ ...form, role: regRole });
+    setLoading(false);
+    if (err || !user) {
+      setError(err || 'Registration failed');
       return;
     }
-
-    setFeedback({
-      type: 'success',
-      text: 'রেজিস্ট্রেশন সফল হয়েছে! ড্যাশবোর্ডে নিয়ে যাওয়া হচ্ছে...',
-    });
-    localStorage.setItem('transport_user', JSON.stringify(res.user));
-    setTimeout(() => {
-      router.push('/student');
-    }, 1000);
+    router.replace(getDashboardPath(user.role));
   };
 
-  const navDetails = {
-    About: {
-      title: 'About University Transport',
-      body: 'আমাদের স্মার্ট ইউনিভার্সিটি ট্রান্সপোর্ট সিস্টেমের মাধ্যমে শিক্ষার্থীরা নিরাপদে ক্যাম্পাসে যাতায়াত, রিয়েল-টাইম বাস লোকেশন ট্র্যাকিং এবং নির্ধারিত সময়ে সিট বুকিং সুবিধা পায়।',
-    },
-    Services: {
-      title: 'Our Transport Services',
-      body: '• বাস ছাড়ার ২৫ মিনিট আগে অনলাইন সিট বুকিং\n• ড্রাইভারের লাইভ GPS ম্যাপ ট্র্যাকিং\n• রুট অনুযায়ী এক্সট্রা বাস অ্যালোকেশন ও ভেরিফাইড স্টুডেন্ট অ্যাক্সেস',
-    },
-    Contact: {
-      title: 'Transport Office Contact',
-      body: 'যেকোনো রুট, শিডিউল অথবা ৮-ডিজিট পেমেন্ট ভেরিফিকেশন কোড সংক্রান্ত সহায়তার জন্য বিশ্ববিদ্যালয়ের ট্রান্সপোর্ট কন্ট্রোল রুম (রুম নং-১০২) অথবা transport@uni.edu.bd-এ যোগাযোগ করো।',
-    },
-  };
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="glass-card px-8 py-6 flex items-center gap-3 text-slate-700 dark:text-slate-200 font-semibold">
+          <Bus className="w-6 h-6 animate-bounce" />
+          <span>Loading your DIU Transport workspace...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className="relative min-h-screen w-full flex flex-col justify-center items-center overflow-x-hidden select-none"
-      style={{ fontFamily: "'Poppins', sans-serif" }}
-    >
-      {/* ভিডিওর মতো নীলচে-ধূসর কুয়াশাচ্ছন্ন বনের ব্যাকগ্রাউন্ড */}
-      <div className="fixed inset-0 -z-10 bg-gradient-to-b from-[#9bbad6] via-[#6e96ba] to-[#162938]">
-        <svg
-          viewBox="0 0 1440 900"
-          preserveAspectRatio="xMidYMid slice"
-          className="w-full h-full object-cover"
-        >
-          {/* দূরের কুয়াশাচ্ছন্ন পাহাড় ও গাছপালা */}
-          <path
-            d="M0,560 Q240,490 480,550 T960,530 T1440,560 L1440,900 L0,900 Z"
-            fill="#4d7599"
-            opacity="0.45"
-          />
-          <path
-            d="M0,630 Q360,570 720,620 T1440,600 L1440,900 L0,900 Z"
-            fill="#345878"
-            opacity="0.65"
-          />
-
-          {/* দূরের বাঘের সিলুয়েট (ভিডিওর ব্যাকগ্রাউন্ডের মতো) */}
-          <g transform="translate(650, 560) scale(0.85)" fill="#5b82a6" opacity="0.55">
-            <path d="M20,65 C35,50 65,48 95,52 C115,45 135,46 148,55 C155,60 152,72 142,74 L132,105 L122,105 L126,80 L92,82 L88,108 L78,108 L80,82 L45,82 L38,108 L28,108 L33,80 C20,78 12,72 20,65 Z" />
-            <path d="M18,67 Q-5,55 -12,72" stroke="#5b82a6" strokeWidth="5" fill="none" strokeLinecap="round" />
-          </g>
-
-          {/* বাম ও ডান পাশের গাঢ় নীল বনের গাছের সিলুয়েট */}
-          <g fill="#1d384f">
-            <rect x="40" y="0" width="28" height="900" />
-            <rect x="115" y="0" width="18" height="900" />
-            <rect x="210" y="0" width="38" height="900" />
-            <rect x="330" y="0" width="22" height="900" />
-            <rect x="1080" y="0" width="24" height="900" />
-            <rect x="1190" y="0" width="42" height="900" />
-            <rect x="1310" y="0" width="20" height="900" />
-            <rect x="1385" y="0" width="32" height="900" />
-          </g>
-
-          {/* উপরের ঝুলন্ত লতা ও পাতা */}
-          <path
-            d="M0,0 L1440,0 L1440,150 Q1200,220 980,120 Q720,250 460,130 Q220,230 0,140 Z"
-            fill="#162938"
-          />
-          <path
-            d="M220,110 Q480,260 760,115 Q1020,240 1240,100"
-            stroke="#162938"
-            strokeWidth="7"
-            fill="none"
-          />
-
-          {/* সামনের হরিণের সিলুয়েট */}
-          <g transform="translate(380, 500) scale(1.1)" fill="#162938">
-            <path d="M85,120 C110,110 155,112 180,128 C192,138 190,165 182,185 L176,280 L162,280 L165,195 L115,195 L110,280 L96,280 L100,192 C82,182 72,155 85,120 Z" />
-            <path d="M95,130 L72,72 C65,65 55,65 50,70 C54,78 65,80 74,80 L84,135 Z" />
-            {/* শিং */}
-            <path
-              d="M72,68 L62,25 M66,48 L48,36 M64,36 L76,20 M78,68 L92,28 M84,48 L102,38"
-              stroke="#162938"
-              strokeWidth="4.5"
-              strokeLinecap="round"
-            />
-          </g>
-
-          {/* নিচের ঘাস ও মাটি */}
-          <path
-            d="M0,760 Q360,720 720,755 T1440,740 L1440,900 L0,900 Z"
-            fill="#162938"
-          />
-        </svg>
-      </div>
-
-      {/* উপরের নেভিগেশন বার (ভিডিওর হুবহু স্টাইল) */}
-      <header className="fixed top-0 left-0 w-full px-5 sm:px-12 lg:px-24 py-4 sm:py-5 flex justify-between items-center z-40">
-        {/* লোগোর জায়গায় Transport */}
-        <button
-          onClick={() => {
-            setActiveNavInfo(null);
-            setIsPopupOpen(true);
-          }}
-          className="text-2xl sm:text-3xl font-bold text-white tracking-wide cursor-pointer"
-        >
-          Transport
-        </button>
-
-        {/* ডেস্কটপ মেনু */}
-        <nav className="hidden md:flex items-center">
-          <button
-            onClick={() => {
-              setActiveNavInfo(null);
-              setIsPopupOpen(true);
-            }}
-            className="nav-link relative text-[1.05rem] text-white font-medium ml-9 cursor-pointer"
-          >
-            Home
-          </button>
-          {['About', 'Services', 'Contact'].map((item) => (
-            <button
-              key={item}
-              onClick={() => {
-                setIsPopupOpen(false);
-                setActiveNavInfo(item);
-              }}
-              className="nav-link relative text-[1.05rem] text-white font-medium ml-9 cursor-pointer"
-            >
-              {item}
-            </button>
-          ))}
-          <button
-            onClick={() => {
-              setActiveNavInfo(null);
-              setIsPopupOpen(true);
-            }}
-            className="ml-10 w-[125px] h-[46px] bg-transparent border-2 border-white rounded-[6px] text-[1.05rem] text-white font-medium hover:bg-white hover:text-[#162938] transition duration-500 cursor-pointer"
-          >
-            Login
-          </button>
-        </nav>
-
-        {/* মোবাইল মেনু ও লগইন বাটন */}
-        <div className="flex md:hidden items-center gap-2.5">
-          <button
-            onClick={() => {
-              setActiveNavInfo(null);
-              setIsPopupOpen(true);
-              setMobileMenuOpen(false);
-            }}
-            className="px-4 py-2 bg-transparent border-2 border-white rounded-[6px] text-sm text-white font-semibold hover:bg-white hover:text-[#162938] transition"
-          >
-            Login
-          </button>
-          <button
-            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="p-2 text-white border border-white/50 rounded-lg"
-            aria-label="Menu"
-          >
-            <Menu size={22} />
-          </button>
+    <div className="min-h-screen flex flex-col justify-between px-4 py-6 sm:py-10">
+      {/* Top Minimal Liquid Glass Header */}
+      <header className="max-w-5xl w-full mx-auto flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-11 h-11 rounded-2xl glass-panel flex items-center justify-center text-slate-800 dark:text-white shadow-sm">
+            <Bus className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-base sm:text-lg font-extrabold tracking-tight text-slate-800 dark:text-white">
+              DIU Smart Transport
+            </h1>
+            <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              Daffodil International University • Fleet & Safety OS
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="hidden sm:inline-flex items-center gap-1.5 glass-card px-3 py-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            {getDatabaseMode() === 'SUPABASE_CLOUD' ? 'Cloud Database Connected' : 'Local Storage Mode'}
+          </span>
+          <ThemeToggle />
         </div>
       </header>
 
-      {/* মোবাইল ড্রপডাউন মেনু */}
-      {mobileMenuOpen && (
-        <div className="fixed top-16 right-5 z-50 md:hidden w-48 rounded-2xl border-2 border-white/50 bg-[#162938]/90 backdrop-blur-xl p-3 flex flex-col gap-2 text-white shadow-xl">
-          <button
-            onClick={() => {
-              setActiveNavInfo(null);
-              setIsPopupOpen(true);
-              setMobileMenuOpen(false);
-            }}
-            className="text-left px-3 py-2 rounded-lg hover:bg-white/15 text-sm font-medium"
-          >
-            Home
-          </button>
-          {['About', 'Services', 'Contact'].map((item) => (
+      {/* Center Liquid Glass Auth Container */}
+      <main className="max-w-xl w-full mx-auto my-auto">
+        <div className="glass-panel p-6 sm:p-8 relative overflow-hidden">
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/90 dark:via-white/30 to-transparent" />
+
+          {/* Mode Switcher */}
+          <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-2xl bg-slate-200/60 dark:bg-slate-800/70 mb-6">
             <button
-              key={item}
-              onClick={() => {
-                setIsPopupOpen(false);
-                setActiveNavInfo(item);
-                setMobileMenuOpen(false);
-              }}
-              className="text-left px-3 py-2 rounded-lg hover:bg-white/15 text-sm font-medium"
-            >
-              {item}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* About / Services / Contact ক্লিক করলে গ্লাস ইনফো কার্ড */}
-      {activeNavInfo && navDetails[activeNavInfo] && (
-        <div className="relative w-[92%] max-w-[440px] rounded-[20px] border-2 border-white/50 bg-white/15 backdrop-blur-[20px] shadow-[0_0_30px_rgba(0,0,0,0.5)] p-8 text-[#162938] mt-16">
-          <button
-            onClick={() => {
-              setActiveNavInfo(null);
-              setIsPopupOpen(true);
-            }}
-            className="absolute top-0 right-0 w-[45px] h-[45px] bg-[#162938] text-white flex items-center justify-center rounded-bl-[20px] rounded-tr-[17px] cursor-pointer"
-          >
-            <X size={22} />
-          </button>
-          <h2 className="text-2xl font-bold mb-3">{navDetails[activeNavInfo].title}</h2>
-          <p className="text-sm font-medium leading-relaxed whitespace-pre-line">
-            {navDetails[activeNavInfo].body}
-          </p>
-        </div>
-      )}
-
-      {/* মূল সোজা Glassmorphism Login & Registration বক্স */}
-      <div
-        className={`relative w-[92%] max-w-[410px] rounded-[20px] border-2 border-white/50 bg-white/15 backdrop-blur-[20px] shadow-[0_0_30px_rgba(0,0,0,0.5)] overflow-hidden transition-all duration-300 mt-14 sm:mt-16 ${isPopupOpen ? 'scale-100 opacity-100' : 'scale-0 opacity-0 pointer-events-none'
-          }`}
-      >
-        {/* উপরের ডান কোণার Close (×) বাটন */}
-        <button
-          onClick={() => setIsPopupOpen(false)}
-          className="absolute top-0 right-0 w-[45px] h-[45px] bg-[#162938] text-white flex items-center justify-center rounded-bl-[20px] z-20 cursor-pointer hover:bg-[#1e384d] transition"
-        >
-          <X size={22} />
-        </button>
-
-        {/* এরর বা সফলতার মেসেজ */}
-        {feedback.text && (
-          <div
-            className={`mx-7 mt-12 -mb-4 p-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 ${feedback.type === 'error'
-              ? 'bg-red-600/90 text-white'
-              : 'bg-emerald-700/90 text-white'
+              type="button"
+              onClick={() => { setMode('login'); setError(''); }}
+              className={`py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
+                mode === 'login'
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
               }`}
-          >
-            {feedback.type === 'error' ? (
-              <AlertCircle size={16} className="shrink-0" />
-            ) : (
-              <CheckCircle2 size={16} className="shrink-0" />
-            )}
-            <span>{feedback.text}</span>
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode('register'); setError(''); }}
+              className={`py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
+                mode === 'register'
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
+              }`}
+            >
+              New Registration (4 Roles)
+            </button>
           </div>
-        )}
 
-        {/* ১. LOGIN ফর্ম (সোজা ও পরিচ্ছন্ন) */}
-        {!isRegisterMode ? (
-          <div className="w-full p-7 sm:p-10">
-            <h2 className="text-[1.85rem] font-bold text-[#162938] text-center mb-6">Login</h2>
+          {error && (
+            <div className="mb-5 p-3.5 rounded-xl bg-rose-500/12 border border-rose-500/35 text-rose-700 dark:text-rose-300 text-xs font-semibold flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
 
-            <form onSubmit={handleLoginSubmit} className="space-y-6">
-              {/* Student Email ফিল্ড */}
-              <div className="relative w-full h-[50px] border-b-2 border-[#162938]">
-                <Mail
-                  size={19}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
-                <input
-                  type="text"
-                  required
-                  value={loginEmail}
-                  onChange={(e) => setLoginEmail(e.target.value)}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.95rem] text-[#162938] font-semibold pr-8 pl-1 pt-2"
-                />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.95rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
-                  Student Email
-                </label>
+          {mode === 'login' ? (
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <h2 className="text-xl font-extrabold text-slate-800 dark:text-white">
+                  Sign In to Your Account
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  Enter your registered DIU Email, Mobile Number, Student ID, or Driving License. Your session remains active until you log out.
+                </p>
               </div>
 
-              {/* Password ফিল্ড */}
-              <div className="relative w-full h-[50px] border-b-2 border-[#162938]">
-                <Lock
-                  size={19}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
-                <input
-                  type="password"
-                  required
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.95rem] text-[#162938] font-semibold pr-8 pl-1 pt-2"
-                />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.95rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1.5">
+                  Email / Mobile / Student ID / License No
+                </label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    type="text"
+                    required
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    placeholder="e.g. jubair@diu.edu.bd or 017XXXXXXXX"
+                    className="glass-input w-full pl-10 pr-4 py-3 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1.5">
                   Password
                 </label>
-              </div>
-
-              {/* Remember me & Forgot Password */}
-              <div className="flex items-center justify-between text-[0.82rem] text-[#162938] font-medium pt-1">
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input type="checkbox" className="accent-[#162938] cursor-pointer" />
-                  <span>Remember me</span>
-                </label>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setFeedback({
-                      type: 'error',
-                      text: 'পাসওয়ার্ড রিসেট করতে ট্রান্সপোর্ট কন্ট্রোল রুমে যোগাযোগ করো।',
-                    })
-                  }
-                  className="hover:underline cursor-pointer"
-                >
-                  Forgot Password?
-                </button>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    type={showPass ? 'text' : 'password'}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter your password"
+                    className="glass-input w-full pl-10 pr-11 py-3 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPass(!showPass)}
+                    className="absolute right-3.5 top-3.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
 
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full h-[45px] bg-[#162938] hover:bg-[#1f394d] text-white rounded-[6px] text-[1rem] font-medium cursor-pointer transition disabled:opacity-60"
+                className="glass-btn-primary w-full py-3.5 rounded-xl font-bold text-sm cursor-pointer disabled:opacity-60"
               >
-                {loading ? 'Logging in...' : 'Login'}
+                {loading ? 'Signing In...' : 'Sign In & Stay Logged In'}
               </button>
-
-              <div className="text-[0.85rem] text-[#162938] text-center font-medium pt-1">
-                <p>
-                  Don&apos;t have an account?{' '}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFeedback({ type: '', text: '' });
-                      setIsRegisterMode(true);
-                    }}
-                    className="font-bold hover:underline cursor-pointer"
-                  >
-                    Register
-                  </button>
+            </form>
+          ) : (
+            <form onSubmit={handleRegister} className="space-y-4">
+              <div>
+                <h2 className="text-lg font-extrabold text-slate-800 dark:text-white">
+                  Create Verified Account
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Select your role and enter the verification code issued by DIU Transport / Accounts Office.
                 </p>
               </div>
-            </form>
 
-            {/* demo */}
-            <div className="mt-4 p-2.5 rounded-lg bg-white/30 text-[11px] text-[#162938] space-y-0.5">
-              <p className="font-bold">Demo Login (Password: 1234):</p>
-              <p>• Student: jubair@diu.edu.bd</p>
-              <p>• Driver: karim.driver@uni.edu.bd</p>
-              <p>• Controller: controller@uni.edu.bd | Admin: admin@uni.edu.bd</p>
-            </div>
-            {/* demo end */}
-          </div>
-        ) : (
-          /* ২. REGISTRATION ফর্ম (৮-ডিজিট ভার্সিটি পেমেন্ট ভেরিফিকেশন কোডসহ) */
-          <div className="w-full p-7 sm:p-9">
-            <h2 className="text-[1.75rem] font-bold text-[#162938] text-center mb-4">
-              Registration
-            </h2>
-
-            <form onSubmit={handleRegisterSubmit} className="space-y-4">
-              {/* Full Name */}
-              <div className="relative w-full h-[46px] border-b-2 border-[#162938]">
-                <User
-                  size={18}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
-                <input
-                  type="text"
-                  required
-                  value={regName}
-                  onChange={(e) => setRegName(e.target.value)}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.9rem] text-[#162938] font-semibold pr-8 pl-1 pt-2"
-                />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.9rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
-                  Full Name
-                </label>
+              {/* 4-Role Selector Pills */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {ROLES.map((r) => {
+                  const Icon = r.icon;
+                  const active = regRole === r.id;
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => { setRegRole(r.id); setError(''); }}
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col items-center text-center gap-1 ${
+                        active
+                          ? 'bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-800 dark:border-white shadow-md'
+                          : 'glass-card text-slate-600 dark:text-slate-300 hover:bg-white/80 dark:hover:bg-slate-800/80'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4" />
+                      <span className="text-xs font-bold">{r.label}</span>
+                    </button>
+                  );
+                })}
               </div>
 
-              {/* Student ID */}
-              <div className="relative w-full h-[46px] border-b-2 border-[#162938]">
-                <IdCard
-                  size={18}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
-                <input
-                  type="text"
-                  required
-                  value={regUniId}
-                  onChange={(e) => setRegUniId(e.target.value)}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.9rem] text-[#162938] font-semibold pr-8 pl-1 pt-2 uppercase"
-                />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.9rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
-                  Student ID (e.g. STU-104)
+              {/* Verification Code (Required for all 4 roles) */}
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
+                  {regRole === 'student'
+                    ? 'Transport Fee Verification Code (8-Digit) *'
+                    : regRole === 'driver'
+                    ? 'Transport Office Driver Code *'
+                    : regRole === 'controller'
+                    ? 'Transport Office Controller Code *'
+                    : 'Admin Authorization Code *'}
                 </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                  <input
+                    type="text"
+                    required
+                    value={form.verification_code}
+                    onChange={(e) => setForm({ ...form, verification_code: e.target.value })}
+                    placeholder="Enter your office verification code"
+                    className="glass-input w-full pl-10 pr-4 py-2.5 text-sm font-mono uppercase"
+                  />
+                </div>
               </div>
 
-              {/* Student Email */}
-              <div className="relative w-full h-[46px] border-b-2 border-[#162938]">
-                <Mail
-                  size={18}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
-                <input
-                  type="email"
-                  required
-                  value={regEmail}
-                  onChange={(e) => setRegEmail(e.target.value)}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.9rem] text-[#162938] font-semibold pr-8 pl-1 pt-2"
-                />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.9rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
-                  Student Email
-                </label>
+              {/* Common Fields */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    placeholder="Enter your full name"
+                    className="glass-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Mobile Number *</label>
+                  <input
+                    type="tel"
+                    required
+                    value={form.phone}
+                    onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                    placeholder="017XXXXXXXX"
+                    className="glass-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
               </div>
 
-              {/* ৮-ডিজিট ভার্সিটি পেমেন্ট ভেরিফিকেশন কোড */}
-              <div className="relative w-full h-[46px] border-b-2 border-[#162938]">
-                <KeyRound
-                  size={18}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={8}
-                  required
-                  value={regCode}
-                  onChange={(e) => setRegCode(e.target.value.replace(/\D/g, ''))}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.9rem] text-[#162938] font-bold tracking-widest pr-8 pl-1 pt-2"
-                />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.88rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
-                  8-Digit Payment Code
-                </label>
-              </div>
+              {/* Student Specific Fields */}
+              {regRole === 'student' && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">DIU Email *</label>
+                      <input
+                        type="email"
+                        required
+                        value={form.email}
+                        onChange={(e) => setForm({ ...form, email: e.target.value })}
+                        placeholder="jubair@diu.edu.bd"
+                        className="glass-input w-full px-3.5 py-2.5 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Student ID *</label>
+                      <input
+                        type="text"
+                        required
+                        value={form.uni_id}
+                        onChange={(e) => setForm({ ...form, uni_id: e.target.value })}
+                        placeholder="e.g. 241-35-489"
+                        className="glass-input w-full px-3.5 py-2.5 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Department</label>
+                      <input
+                        type="text"
+                        value={form.department}
+                        onChange={(e) => setForm({ ...form, department: e.target.value })}
+                        placeholder="SWE / CSE"
+                        className="glass-input w-full px-3 py-2.5 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Batch</label>
+                      <input
+                        type="text"
+                        value={form.batch}
+                        onChange={(e) => setForm({ ...form, batch: e.target.value })}
+                        placeholder="e.g. 42"
+                        className="glass-input w-full px-3 py-2.5 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Guardian SOS Phone *</label>
+                      <input
+                        type="tel"
+                        required
+                        value={form.guardian_phone}
+                        onChange={(e) => setForm({ ...form, guardian_phone: e.target.value })}
+                        placeholder="017XXXXXXXX"
+                        className="glass-input w-full px-3 py-2.5 text-sm"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Driver Specific Fields */}
+              {regRole === 'driver' && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Driving License No *</label>
+                      <input
+                        type="text"
+                        required
+                        value={form.license_no}
+                        onChange={(e) => setForm({ ...form, license_no: e.target.value })}
+                        placeholder="DL-DHK-2026-XXXX"
+                        className="glass-input w-full px-3.5 py-2.5 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Home Address</label>
+                      <input
+                        type="text"
+                        value={form.home_address}
+                        onChange={(e) => setForm({ ...form, home_address: e.target.value })}
+                        placeholder="Savar / Ashulia"
+                        className="glass-input w-full px-3.5 py-2.5 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Helper Name *</label>
+                      <input
+                        type="text"
+                        required
+                        value={form.helper_name}
+                        onChange={(e) => setForm({ ...form, helper_name: e.target.value })}
+                        placeholder="Bus Helper Name"
+                        className="glass-input w-full px-3.5 py-2.5 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Helper Mobile *</label>
+                      <input
+                        type="tel"
+                        required
+                        value={form.helper_phone}
+                        onChange={(e) => setForm({ ...form, helper_phone: e.target.value })}
+                        placeholder="018XXXXXXXX"
+                        className="glass-input w-full px-3.5 py-2.5 text-sm"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Controller & Admin Fields */}
+              {(regRole === 'controller' || regRole === 'admin') && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">University Official Email *</label>
+                  <input
+                    type="email"
+                    required
+                    value={form.email}
+                    onChange={(e) => setForm({ ...form, email: e.target.value })}
+                    placeholder="name@diu.edu.bd"
+                    className="glass-input w-full px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+              )}
 
               {/* Password */}
-              <div className="relative w-full h-[46px] border-b-2 border-[#162938]">
-                <Lock
-                  size={18}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#162938]"
-                />
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Create Password *</label>
                 <input
                   type="password"
                   required
-                  value={regPassword}
-                  onChange={(e) => setRegPassword(e.target.value)}
-                  placeholder=" "
-                  className="peer w-full h-full bg-transparent border-none outline-none text-[0.9rem] text-[#162938] font-semibold pr-8 pl-1 pt-2"
+                  minLength={4}
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  placeholder="Create a strong password (min 4 chars)"
+                  className="glass-input w-full px-3.5 py-2.5 text-sm"
                 />
-                <label className="absolute left-1 top-1/2 -translate-y-1/2 text-[0.9rem] text-[#162938] font-medium pointer-events-none transition-all duration-300 peer-focus:top-[-4px] peer-focus:text-xs peer-[:not(:placeholder-shown)]:top-[-4px] peer-[:not(:placeholder-shown)]:text-xs">
-                  Password
-                </label>
               </div>
-
-              <label className="flex items-center gap-2 text-[0.8rem] text-[#162938] font-medium pt-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={agreeTerms}
-                  onChange={(e) => setAgreeTerms(e.target.checked)}
-                  className="accent-[#162938] cursor-pointer"
-                />
-                <span>I agree to the terms &amp; conditions</span>
-              </label>
 
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full h-[44px] bg-[#162938] hover:bg-[#1f394d] text-white rounded-[6px] text-[0.95rem] font-medium cursor-pointer transition disabled:opacity-60"
+                className="glass-btn-primary w-full py-3.5 rounded-xl font-bold text-sm cursor-pointer disabled:opacity-60"
               >
-                {loading ? 'Verifying Code...' : 'Register'}
+                {loading ? 'Saving to Database...' : `Complete ${regRole.toUpperCase()} Registration`}
               </button>
-
-              <div className="text-[0.82rem] text-[#162938] text-center font-medium">
-                <p>
-                  Already have an account?{' '}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFeedback({ type: '', text: '' });
-                      setIsRegisterMode(false);
-                    }}
-                    className="font-bold hover:underline cursor-pointer"
-                  >
-                    Login
-                  </button>
-                </p>
-              </div>
             </form>
+          )}
+        </div>
+      </main>
 
-            {/* demo */}
-            <div className="mt-3 p-2 rounded-lg bg-white/30 text-[11px] text-[#162938]">
-              <p className="font-bold">Demo 8-Digit Code Test:</p>
-              <p>ID: <b>STU-104</b> | 8-Digit Code: <b>20261001</b></p>
-            </div>
-            {/* demo end */}
-          </div>
-        )}
-      </div>
-
-      {/* নেভিগেশন লিংকের সাদা আন্ডারলাইন অ্যানিমেশনের জন্য CSS */}
-      <style jsx>{`
-        .nav-link::after {
-          content: '';
-          position: absolute;
-          left: 0;
-          bottom: -6px;
-          width: 100%;
-          height: 3px;
-          background: #fff;
-          border-radius: 5px;
-          transform-origin: right;
-          transform: scaleX(0);
-          transition: transform 0.5s;
-        }
-        .nav-link:hover::after {
-          transform-origin: left;
-          transform: scaleX(1);
-        }
-      `}</style>
+      <footer className="text-center text-[11px] text-slate-500 dark:text-slate-400 mt-6">
+        Daffodil International University • Smart Campus Transport System
+      </footer>
     </div>
   );
 }
