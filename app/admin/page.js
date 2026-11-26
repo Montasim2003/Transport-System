@@ -2,13 +2,14 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  ShieldCheck, Bus, Users, FileSpreadsheet, Download, KeyRound,
-  LogOut, MapPin, ShieldAlert, ClipboardList, Search, Copy, Check, RefreshCw, Plus, Trash2
+  ShieldCheck, FileSpreadsheet, Download, KeyRound,
+  LogOut, MapPin, ShieldAlert, ClipboardList, Search, Copy, Check,
+  RefreshCw, Plus, Trash2, Sparkles, Lock, Receipt
 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
 import LiveBusMap from '@/components/LiveBusMap';
 import { db } from '@/lib/supabase';
-import { getSession, clearSession, getDashboardPath } from '@/lib/auth';
+import { getVerifiedSession, clearSession, getDashboardPath } from '@/lib/auth';
 
 function escapeCsvCell(val) {
   const s = String(val ?? '');
@@ -21,7 +22,7 @@ function escapeCsvCell(val) {
 export default function AdminDashboard() {
   const router = useRouter();
   const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('map'); // map | students_csv | codes | audits
+  const [activeTab, setActiveTab] = useState('codes'); // codes | map | students_csv | audits
 
   const [buses, setBuses] = useState([]);
   const [routes, setRoutes] = useState([]);
@@ -38,24 +39,37 @@ export default function AdminDashboard() {
   const [copiedCode, setCopiedCode] = useState('');
   const [toast, setToast] = useState('');
 
-  // Code Vault Generator
-  const [newCodeForm, setNewCodeForm] = useState({ role: 'student', customCode: '', assigned_uni_id: '', assigned_name: '' });
+  // Dedicated Accounts Office: Student 8-Digit Fee Code Generator
+  const [studentFeeForm, setStudentFeeForm] = useState({
+    student_id: '',
+    student_name: '',
+    payment_ref: '',
+  });
+  const [latestIssuedCode, setLatestIssuedCode] = useState(null);
+  const [issuingStudent, setIssuingStudent] = useState(false);
+
+  // Staff Code Generator (Driver / Controller / Admin)
+  const [staffCodeForm, setStaffCodeForm] = useState({
+    role: 'driver',
+    assigned_name: '',
+    assigned_uni_id: '',
+  });
 
   const today = new Date().toISOString().slice(0, 10);
 
   const showToast = (msg) => {
     setToast(msg);
-    setTimeout(() => setToast(''), 4000);
+    setTimeout(() => setToast(''), 4500);
   };
 
   const loadData = useCallback(async () => {
     const [bList, rList, uList, bkList, sosList, cList, aList] = await Promise.all([
       db.getAll('buses', 'id', true),
       db.getAll('routes', 'id', true),
-      db.getAll('users', 'id', true),
+      db.getDirectory(),
       db.getAll('bookings', 'id', true),
       db.getAll('sos_alerts', 'id', false),
-      db.getAll('verification_codes', 'id', false),
+      db.getVerificationCodes(),
       db.getAll('audit_logs', 'id', false),
     ]);
     setBuses(bList);
@@ -68,13 +82,18 @@ export default function AdminDashboard() {
   }, [today]);
 
   useEffect(() => {
-    const session = getSession();
-    if (!session) { router.replace('/'); return; }
-    if (session.role !== 'admin') { router.replace(getDashboardPath(session.role)); return; }
-    setUser(session);
-    loadData();
-    const poll = setInterval(loadData, 5000);
-    return () => clearInterval(poll);
+    let active = true;
+    let poll;
+    (async () => {
+      const session = await getVerifiedSession();
+      if (!active) return;
+      if (!session) { router.replace('/'); return; }
+      if (session.role !== 'admin') { router.replace(getDashboardPath(session.role)); return; }
+      setUser(session);
+      loadData();
+      poll = setInterval(loadData, 5000);
+    })();
+    return () => { active = false; if (poll) clearInterval(poll); };
   }, [router, loadData]);
 
   const students = useMemo(() => users.filter((u) => u.role === 'student'), [users]);
@@ -88,17 +107,17 @@ export default function AdminDashboard() {
     return students.filter((s) => {
       if (deptFilter !== 'ALL' && s.department !== deptFilter) return false;
       if (!q) return true;
-      return [s.name, s.email, s.uni_id, s.phone, s.department, s.batch]
+      return [s.name, s.email, s.uni_id, s.phone, s.department, s.batch, s.gender]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
   }, [students, searchQuery, deptFilter]);
 
-  // Build Live CSV String for Registered Students
   const csvContent = useMemo(() => {
     const headers = [
       'Student_ID',
       'Full_Name',
+      'Gender',
       'DIU_Email',
       'Mobile_Number',
       'Department',
@@ -110,6 +129,7 @@ export default function AdminDashboard() {
     const rows = filteredStudents.map((s) => [
       s.uni_id || '',
       s.name || '',
+      (s.gender || '').toUpperCase(),
       s.email || '',
       s.phone || '',
       s.department || '',
@@ -133,22 +153,47 @@ export default function AdminDashboard() {
     showToast(`📥 Downloaded DIU_Registered_Students_${today}.csv (${filteredStudents.length} records)`);
   };
 
-  const handleCreateCode = async (e) => {
+  // Dedicated Accounts Office 8-Digit Student Fee Code Generator (Zero Overlap, Single-Use, Student-ID Bound)
+  const handleGenerateStudent8DigitCode = async (e) => {
     e.preventDefault();
-    const rolePrefix = { student: '2026', driver: 'DRV-', controller: 'CTL-', admin: 'ADM-' }[newCodeForm.role];
-    const code = (newCodeForm.customCode.trim().toUpperCase()) || `${rolePrefix}${Math.floor(1000 + Math.random() * 9000)}`;
-    const { error } = await db.insert('verification_codes', {
-      code,
-      role: newCodeForm.role,
-      assigned_uni_id: newCodeForm.assigned_uni_id.trim() || null,
-      assigned_name: newCodeForm.assigned_name.trim() || null,
-      is_used: false,
-      created_by: user.name,
+    const cleanId = studentFeeForm.student_id.trim();
+    if (!cleanId) {
+      showToast('⚠️ Please enter the Student ID first.');
+      return;
+    }
+    setIssuingStudent(true);
+    const { data, error } = await db.issueFeeCode({
+      role: 'student',
+      assigned_uni_id: cleanId,
+      assigned_name: studentFeeForm.student_name.trim(),
+      payment_ref: studentFeeForm.payment_ref.trim(),
     });
-    if (error) { showToast(`⚠️ ${error}`); return; }
-    await db.logAudit(user, 'CODE_ISSUED', `Issued ${newCodeForm.role.toUpperCase()} code: ${code}`);
-    setNewCodeForm({ role: 'student', customCode: '', assigned_uni_id: '', assigned_name: '' });
-    showToast(`🔑 Created ${newCodeForm.role.toUpperCase()} Verification Code: ${code}`);
+    setIssuingStudent(false);
+
+    if (error || !data) {
+      showToast(`⚠️ ${error || 'Could not generate 8-digit code.'}`);
+      return;
+    }
+
+    setLatestIssuedCode(data);
+    setStudentFeeForm({ student_id: '', student_name: '', payment_ref: '' });
+    showToast(`✅ Unique 8-Digit Transport Code ${data.code} issued for Student ID ${cleanId}!`);
+    loadData();
+  };
+
+  const handleGenerateStaffCode = async (e) => {
+    e.preventDefault();
+    const { data, error } = await db.issueFeeCode({
+      role: staffCodeForm.role,
+      assigned_uni_id: staffCodeForm.assigned_uni_id.trim(),
+      assigned_name: staffCodeForm.assigned_name.trim(),
+    });
+    if (error || !data) {
+      showToast(`⚠️ ${error || 'Failed to issue staff code.'}`);
+      return;
+    }
+    setStaffCodeForm({ role: 'driver', assigned_name: '', assigned_uni_id: '' });
+    showToast(`🔑 Generated ${data.role.toUpperCase()} Code: ${data.code}`);
     loadData();
   };
 
@@ -165,7 +210,7 @@ export default function AdminDashboard() {
   return (
     <div className="min-h-screen pb-14 px-3 sm:px-6 pt-4">
       <div className="max-w-7xl mx-auto space-y-5">
-        {/* Top Executive Header */}
+        {/* Header */}
         <header className="glass-panel px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-2xl bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 flex items-center justify-center">
@@ -173,10 +218,10 @@ export default function AdminDashboard() {
             </div>
             <div>
               <h1 className="text-base sm:text-lg font-extrabold text-slate-800 dark:text-white">
-                DIU Executive Admin & Dean Portal
+                DIU Executive Admin & Accounts Portal
               </h1>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {user.name} • {user.email}
+                {user.name} • {user.email} • Zero-Trust RLS Active
               </p>
             </div>
           </div>
@@ -227,8 +272,8 @@ export default function AdminDashboard() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {[
             { label: 'Total Fleet Buses', value: buses.length, sub: `${buses.filter((b) => b.status === 'active').length} Live Moving` },
-            { label: 'Registered Students', value: students.length, sub: 'Verified via DIU Vault' },
-            { label: "Today's Seat Bookings", value: bookings.length, sub: `${routes.length} Active Routes` },
+            { label: 'Registered Students', value: students.length, sub: 'Verified via 8-Digit Code' },
+            { label: 'Unused Fee Codes', value: codes.filter((c) => c.role === 'student' && !c.is_used).length, sub: 'Zero-Overlap Vault' },
             { label: 'Active SOS Alerts', value: activeSOS.length, sub: activeSOS.length ? 'Immediate Action' : 'All Clear' },
           ].map((kpi, i) => (
             <div key={i} className="glass-card p-4">
@@ -239,12 +284,12 @@ export default function AdminDashboard() {
           ))}
         </div>
 
-        {/* Admin Navigation Tabs */}
+        {/* Navigation Tabs */}
         <nav className="flex flex-wrap gap-2">
           {[
+            { id: 'codes', label: 'Accounts 8-Digit Code Generator', icon: KeyRound },
             { id: 'map', label: 'All-Bus Live Map', icon: MapPin },
             { id: 'students_csv', label: `Registered Students CSV (${students.length})`, icon: FileSpreadsheet },
-            { id: 'codes', label: 'Verification Code Vault', icon: KeyRound },
             { id: 'audits', label: 'Security Audit Logs', icon: ClipboardList },
           ].map((t) => {
             const Icon = t.icon;
@@ -262,7 +307,210 @@ export default function AdminDashboard() {
           })}
         </nav>
 
-        {/* ==================== TAB 1: LIVE FLEET MAP ==================== */}
+        {/* ==================== TAB 1: ACCOUNTS 8-DIGIT STUDENT CODE GENERATOR ==================== */}
+        {activeTab === 'codes' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* Left Column: Primary Student Transport Fee 8-Digit Code Generator */}
+            <div className="lg:col-span-5 space-y-5">
+              <div className="glass-panel p-5 sm:p-6 space-y-4 border-2 border-slate-400/30 dark:border-slate-500/30">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 flex items-center justify-center shrink-0">
+                    <Receipt className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-sm sm:text-base font-extrabold text-slate-800 dark:text-white">
+                      Student Transport Fee — 8-Digit Code Generator
+                    </h2>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      Enter the Student ID after fee payment. System generates a strictly unique, single-use 8-digit code bound to that Student ID (zero overlap guaranteed by PostgreSQL).
+                    </p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleGenerateStudent8DigitCode} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">
+                      Student ID (Required) *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={studentFeeForm.student_id}
+                      onChange={(e) => setStudentFeeForm({ ...studentFeeForm, student_id: e.target.value })}
+                      placeholder="e.g. 241-35-489"
+                      className="glass-input w-full px-3.5 py-2.5 text-sm font-mono font-bold"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 mb-1">Student Name (Optional)</label>
+                      <input
+                        type="text"
+                        value={studentFeeForm.student_name}
+                        onChange={(e) => setStudentFeeForm({ ...studentFeeForm, student_name: e.target.value })}
+                        placeholder="e.g. Jubair Ahmed"
+                        className="glass-input w-full px-3 py-2 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 mb-1">Accounts Receipt No (Optional)</label>
+                      <input
+                        type="text"
+                        value={studentFeeForm.payment_ref}
+                        onChange={(e) => setStudentFeeForm({ ...studentFeeForm, payment_ref: e.target.value })}
+                        placeholder="e.g. RCPT-2026-901"
+                        className="glass-input w-full px-3 py-2 text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={issuingStudent}
+                    className="glass-btn-primary w-full py-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    {issuingStudent ? 'Generating Cryptographic 8-Digit Code...' : 'Generate Unique 8-Digit Transport Code'}
+                  </button>
+                </form>
+
+                {/* GENERATED 8-DIGIT CODE DISPLAY CARD (DIRECTLY BELOW INPUT!) */}
+                {latestIssuedCode && (
+                  <div className="mt-4 p-4 rounded-2xl bg-emerald-500/10 dark:bg-emerald-500/15 border-2 border-emerald-500/50 space-y-2.5">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                      <span className="flex items-center gap-1">
+                        <Lock className="w-3.5 h-3.5" /> Bound to ID: {latestIssuedCode.assigned_uni_id}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px]">
+                        1-Time Use Only
+                      </span>
+                    </div>
+
+                    <div className="bg-white/90 dark:bg-slate-900/90 rounded-xl p-3.5 flex items-center justify-between border border-emerald-500/30">
+                      <div>
+                        <div className="text-[10px] uppercase font-bold text-slate-400">8-Digit Registration Code</div>
+                        <div className="text-2xl sm:text-3xl font-mono font-black tracking-[0.22em] text-slate-900 dark:text-white mt-0.5">
+                          {latestIssuedCode.code}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyCode(latestIssuedCode.code)}
+                        className="glass-btn-primary px-3.5 py-2.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {copiedCode === latestIssuedCode.code ? (
+                          <><Check className="w-4 h-4" /> Copied</>
+                        ) : (
+                          <><Copy className="w-4 h-4" /> Copy</>
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                      Hand this 8-digit code to the student. When they register in the DIU Transport App with Student ID <b>{latestIssuedCode.assigned_uni_id}</b>, this code burns permanently after 1 use.
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Staff Code Issuer (Driver / Controller / Admin) */}
+              <form onSubmit={handleGenerateStaffCode} className="glass-card p-5 space-y-3">
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                  <Plus className="w-4 h-4" /> Issue Staff Registration Code (Driver / Controller / Admin)
+                </h3>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <select
+                    value={staffCodeForm.role}
+                    onChange={(e) => setStaffCodeForm({ ...staffCodeForm, role: e.target.value })}
+                    className="glass-input px-3 py-2 text-xs font-bold"
+                  >
+                    <option value="driver">Driver Code</option>
+                    <option value="controller">Controller Code</option>
+                    <option value="admin">Admin Code</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={staffCodeForm.assigned_name}
+                    onChange={(e) => setStaffCodeForm({ ...staffCodeForm, assigned_name: e.target.value })}
+                    placeholder="Staff Name (Optional)"
+                    className="glass-input px-3 py-2 text-xs"
+                  />
+                </div>
+                <button type="submit" className="glass-btn w-full py-2.5 rounded-xl text-xs font-extrabold cursor-pointer">
+                  Generate Unique Staff Code
+                </button>
+              </form>
+            </div>
+
+            {/* Right Column: Complete Issued Code Vault */}
+            <div className="lg:col-span-7 glass-card p-4 sm:p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-800 dark:text-white">
+                    Issued Verification Codes Vault ({codes.length})
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Protected by PostgreSQL RLS — only Admin & Controller can view this registry.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2 max-h-[540px] overflow-y-auto pr-1">
+                {codes.map((c) => (
+                  <div key={c.id} className="p-3.5 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-white/70 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        <span className="font-mono font-black text-base tracking-wider text-slate-900 dark:text-white">
+                          {c.code}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-slate-200 dark:bg-slate-700">
+                          {c.role}
+                        </span>
+                        {c.assigned_uni_id && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-sky-500/15 text-sky-700 dark:text-sky-300">
+                            ID: {c.assigned_uni_id}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {c.assigned_name ? `${c.assigned_name} • ` : ''}
+                        {c.payment_ref ? `Receipt: ${c.payment_ref} • ` : ''}
+                        {c.used_by_email ? `Redeemed by ${c.used_by_email}` : `Issued by ${c.created_by || 'Office'}`}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase ${
+                        c.is_used
+                          ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                          : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                      }`}>
+                        {c.is_used ? 'Used (Burned)' : 'Active (1-Use)'}
+                      </span>
+                      {!c.is_used && (
+                        <>
+                          <button onClick={() => handleCopyCode(c.code)} className="glass-btn p-1.5 rounded-lg cursor-pointer" title="Copy Code">
+                            {copiedCode === c.code ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            onClick={async () => { await db.revokeCode(c.id); showToast(`Revoked unused code ${c.code}`); loadData(); }}
+                            className="p-1.5 rounded-lg bg-rose-500/15 text-rose-600 cursor-pointer"
+                            title="Revoke Unused Code"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================== TAB 2: LIVE FLEET MAP ==================== */}
         {activeTab === 'map' && (
           <div className="glass-card p-4 sm:p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -287,7 +535,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* ==================== TAB 2: REGISTERED STUDENTS CSV VIEWER & EXPORTER ==================== */}
+        {/* ==================== TAB 3: REGISTERED STUDENTS CSV ==================== */}
         {activeTab === 'students_csv' && (
           <div className="glass-card p-4 sm:p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -300,22 +548,15 @@ export default function AdminDashboard() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => setShowRawCsv(!showRawCsv)}
-                  className="glass-btn px-3 py-2 rounded-xl text-xs font-bold cursor-pointer"
-                >
+                <button onClick={() => setShowRawCsv(!showRawCsv)} className="glass-btn px-3 py-2 rounded-xl text-xs font-bold cursor-pointer">
                   {showRawCsv ? 'Spreadsheet Table View' : 'View Raw CSV Text'}
                 </button>
-                <button
-                  onClick={handleDownloadCsv}
-                  className="glass-btn-primary px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
-                >
+                <button onClick={handleDownloadCsv} className="glass-btn-primary px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer">
                   <Download className="w-4 h-4" /> Download .CSV File
                 </button>
               </div>
             </div>
 
-            {/* Filter & Search Bar */}
             <div className="flex flex-wrap gap-2">
               <div className="relative flex-1 min-w-[200px]">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -323,15 +564,11 @@ export default function AdminDashboard() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search by Name, Student ID, DIU Email, Phone..."
+                  placeholder="Search by Name, Student ID, Gender, DIU Email, Phone..."
                   className="glass-input w-full pl-9 pr-3 py-2 text-xs"
                 />
               </div>
-              <select
-                value={deptFilter}
-                onChange={(e) => setDeptFilter(e.target.value)}
-                className="glass-input px-3 py-2 text-xs font-bold"
-              >
+              <select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)} className="glass-input px-3 py-2 text-xs font-bold">
                 {departments.map((d) => <option key={d} value={d}>Dept: {d}</option>)}
               </select>
             </div>
@@ -347,6 +584,7 @@ export default function AdminDashboard() {
                     <tr>
                       <th className="px-3.5 py-3">Student ID</th>
                       <th className="px-3.5 py-3">Full Name</th>
+                      <th className="px-3.5 py-3">Gender</th>
                       <th className="px-3.5 py-3">DIU Email</th>
                       <th className="px-3.5 py-3">Mobile</th>
                       <th className="px-3.5 py-3">Dept / Batch</th>
@@ -359,6 +597,7 @@ export default function AdminDashboard() {
                       <tr key={s.id} className="hover:bg-white/60 dark:hover:bg-slate-800/50">
                         <td className="px-3.5 py-2.5 font-mono font-bold">{s.uni_id || '—'}</td>
                         <td className="px-3.5 py-2.5 font-bold text-slate-800 dark:text-white">{s.name}</td>
+                        <td className="px-3.5 py-2.5 uppercase font-bold">{s.gender || '—'}</td>
                         <td className="px-3.5 py-2.5">{s.email}</td>
                         <td className="px-3.5 py-2.5">{s.phone || '—'}</td>
                         <td className="px-3.5 py-2.5">{s.department || '—'} {s.batch ? `/ B-${s.batch}` : ''}</td>
@@ -373,87 +612,11 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* ==================== TAB 3: VERIFICATION CODE VAULT ==================== */}
-        {activeTab === 'codes' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-            <form onSubmit={handleCreateCode} className="lg:col-span-4 glass-card p-5 space-y-3 h-fit">
-              <h2 className="text-sm font-extrabold flex items-center gap-2 text-slate-800 dark:text-white">
-                <Plus className="w-4 h-4" /> Generate Office Verification Code
-              </h2>
-              <p className="text-[11px] text-slate-500">
-                Supports all 4 roles. Leave code blank to auto-generate a secure 8-character code.
-              </p>
-              <select
-                value={newCodeForm.role}
-                onChange={(e) => setNewCodeForm({ ...newCodeForm, role: e.target.value })}
-                className="glass-input w-full px-3 py-2 text-xs font-bold"
-              >
-                <option value="student">Student (Payment Code)</option>
-                <option value="driver">Driver (Transport Office Code)</option>
-                <option value="controller">Controller (Office Code)</option>
-                <option value="admin">Admin (Authorization Code)</option>
-              </select>
-              <input
-                type="text"
-                value={newCodeForm.customCode}
-                onChange={(e) => setNewCodeForm({ ...newCodeForm, customCode: e.target.value })}
-                placeholder="Custom Code (Optional — Auto if blank)"
-                className="glass-input w-full px-3 py-2 text-xs font-mono uppercase"
-              />
-              <input
-                type="text"
-                value={newCodeForm.assigned_name}
-                onChange={(e) => setNewCodeForm({ ...newCodeForm, assigned_name: e.target.value })}
-                placeholder="Assigned Person Name (Optional)"
-                className="glass-input w-full px-3 py-2 text-xs"
-              />
-              <input
-                type="text"
-                value={newCodeForm.assigned_uni_id}
-                onChange={(e) => setNewCodeForm({ ...newCodeForm, assigned_uni_id: e.target.value })}
-                placeholder="Assigned Uni ID (Optional)"
-                className="glass-input w-full px-3 py-2 text-xs"
-              />
-              <button type="submit" className="glass-btn-primary w-full py-2.5 rounded-xl text-xs font-bold cursor-pointer">
-                Issue Verification Code
-              </button>
-            </form>
-
-            <div className="lg:col-span-8 glass-card p-4 sm:p-5 space-y-2.5">
-              <h3 className="text-sm font-extrabold text-slate-800 dark:text-white">Issued Codes Registry</h3>
-              <div className="space-y-2 max-h-[420px] overflow-y-auto">
-                {codes.map((c) => (
-                  <div key={c.id} className="p-3 rounded-xl bg-white/55 dark:bg-slate-800/55 border border-white/70 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono font-extrabold text-sm text-slate-800 dark:text-white">{c.code}</span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-slate-200 dark:bg-slate-700">{c.role}</span>
-                      <span className="text-slate-500">{c.assigned_name || 'Open'} {c.used_by_email ? `• Used by ${c.used_by_email}` : ''}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[11px] font-bold ${c.is_used ? 'text-rose-500' : 'text-emerald-600'}`}>
-                        {c.is_used ? 'Used' : 'Available'}
-                      </span>
-                      <button onClick={() => handleCopyCode(c.code)} className="glass-btn p-1.5 rounded-lg cursor-pointer" title="Copy Code">
-                        {copiedCode === c.code ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                      </button>
-                      {!c.is_used && (
-                        <button onClick={async () => { await db.remove('verification_codes', c.id); loadData(); }} className="p-1.5 rounded-lg bg-rose-500/15 text-rose-600 cursor-pointer">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* ==================== TAB 4: SECURITY AUDIT LOGS ==================== */}
         {activeTab === 'audits' && (
           <div className="glass-card p-4 sm:p-5 space-y-3">
             <h2 className="text-sm font-extrabold text-slate-800 dark:text-white">
-              System Security & Operations Audit Trail
+              Zero-Trust Security & Operations Audit Trail
             </h2>
             <div className="space-y-2 max-h-[450px] overflow-y-auto">
               {audits.map((a) => (

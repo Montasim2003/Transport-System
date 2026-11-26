@@ -6,8 +6,9 @@ import {
   Mail, KeyRound, Eye, EyeOff, AlertCircle
 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
-import { getSession, getDashboardPath, loginUser, registerUser } from '@/lib/auth';
+import { getVerifiedSession, getDashboardPath, loginUser, registerUser } from '@/lib/auth';
 import { getDatabaseMode } from '@/lib/supabase';
+import { evaluatePasswordStrength } from '@/lib/security';
 
 const ROLES = [
   { id: 'student', label: 'Student', icon: GraduationCap },
@@ -19,7 +20,7 @@ const ROLES = [
 export default function AuthPortalPage() {
   const router = useRouter();
   const [checkingSession, setCheckingSession] = useState(true);
-  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [mode, setMode] = useState('login');
   const [regRole, setRegRole] = useState('student');
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -29,13 +30,14 @@ export default function AuthPortalPage() {
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
 
-  // Multi-Role Registration State
+  // Registration State (includes Gender for Student)
   const [form, setForm] = useState({
     verification_code: '',
     name: '',
     uni_id: '',
     email: '',
     phone: '',
+    gender: 'male',
     password: '',
     department: 'SWE',
     batch: '',
@@ -46,14 +48,18 @@ export default function AuthPortalPage() {
     home_address: '',
   });
 
-  // Persistent Auto-Login: Redirect directly to user's dashboard unless they clicked Logout
   useEffect(() => {
-    const existing = getSession();
-    if (existing?.role) {
-      router.replace(getDashboardPath(existing.role));
-      return;
-    }
-    setCheckingSession(false);
+    let active = true;
+    (async () => {
+      const existing = await getVerifiedSession();
+      if (!active) return;
+      if (existing?.role) {
+        router.replace(getDashboardPath(existing.role));
+        return;
+      }
+      setCheckingSession(false);
+    })();
+    return () => { active = false; };
   }, [router]);
 
   const handleLogin = async (e) => {
@@ -82,12 +88,14 @@ export default function AuthPortalPage() {
     router.replace(getDashboardPath(user.role));
   };
 
+  const pwdStrength = evaluatePasswordStrength(form.password);
+
   if (checkingSession) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="glass-card px-8 py-6 flex items-center gap-3 text-slate-700 dark:text-slate-200 font-semibold">
           <Bus className="w-6 h-6 animate-bounce" />
-          <span>Loading your DIU Transport workspace...</span>
+          <span>Verifying signed DIU Transport security token...</span>
         </div>
       </div>
     );
@@ -95,7 +103,7 @@ export default function AuthPortalPage() {
 
   return (
     <div className="min-h-screen flex flex-col justify-between px-4 py-6 sm:py-10">
-      {/* Top Minimal Liquid Glass Header */}
+      {/* Header */}
       <header className="max-w-5xl w-full mx-auto flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <div className="w-11 h-11 rounded-2xl glass-panel flex items-center justify-center text-slate-800 dark:text-white shadow-sm">
@@ -106,25 +114,25 @@ export default function AuthPortalPage() {
               DIU Smart Transport
             </h1>
             <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-              Daffodil International University • Fleet & Safety OS
+              Daffodil International University • Zero-Trust Fleet & Safety OS
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <span className="hidden sm:inline-flex items-center gap-1.5 glass-card px-3 py-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            {getDatabaseMode() === 'SUPABASE_CLOUD' ? 'Cloud Database Connected' : 'Local Storage Mode'}
+            {getDatabaseMode() === 'SUPABASE_ZERO_TRUST' ? 'Zero-Trust Security Active' : 'Local Mode'}
           </span>
           <ThemeToggle />
         </div>
       </header>
 
-      {/* Center Liquid Glass Auth Container */}
+      {/* Main Auth Container */}
       <main className="max-w-xl w-full mx-auto my-auto">
         <div className="glass-panel p-6 sm:p-8 relative overflow-hidden">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/90 dark:via-white/30 to-transparent" />
 
-          {/* Mode Switcher */}
+          {/* Mode Tabs */}
           <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-2xl bg-slate-200/60 dark:bg-slate-800/70 mb-6">
             <button
               type="button"
@@ -164,7 +172,7 @@ export default function AuthPortalPage() {
                   Sign In to Your Account
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                  Enter your registered DIU Email, Mobile Number, Student ID, or Driving License. Your session remains active until you log out.
+                  Enter your registered DIU Email, Mobile Number, Student ID, or Driving License. Protected by salted SHA-256 & signed sessions.
                 </p>
               </div>
 
@@ -214,7 +222,7 @@ export default function AuthPortalPage() {
                 disabled={loading}
                 className="glass-btn-primary w-full py-3.5 rounded-xl font-bold text-sm cursor-pointer disabled:opacity-60"
               >
-                {loading ? 'Signing In...' : 'Sign In & Stay Logged In'}
+                {loading ? 'Authenticating...' : 'Sign In & Stay Logged In'}
               </button>
             </form>
           ) : (
@@ -228,7 +236,7 @@ export default function AuthPortalPage() {
                 </p>
               </div>
 
-              {/* 4-Role Selector Pills */}
+              {/* 4-Role Selector */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {ROLES.map((r) => {
                   const Icon = r.icon;
@@ -251,7 +259,7 @@ export default function AuthPortalPage() {
                 })}
               </div>
 
-              {/* Verification Code (Required for all 4 roles) */}
+              {/* Office Code */}
               <div>
                 <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
                   {regRole === 'student'
@@ -269,13 +277,13 @@ export default function AuthPortalPage() {
                     required
                     value={form.verification_code}
                     onChange={(e) => setForm({ ...form, verification_code: e.target.value })}
-                    placeholder="Enter your office verification code"
+                    placeholder={regRole === 'student' ? '8-Digit Accounts Code (e.g. 84920317)' : 'Enter office verification code'}
                     className="glass-input w-full pl-10 pr-4 py-2.5 text-sm font-mono uppercase"
                   />
                 </div>
               </div>
 
-              {/* Common Fields */}
+              {/* Full Name + Mobile */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Full Name *</label>
@@ -301,7 +309,7 @@ export default function AuthPortalPage() {
                 </div>
               </div>
 
-              {/* Student Specific Fields */}
+              {/* Student Fields + Gender Selection (Male / Female) */}
               {regRole === 'student' && (
                 <>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -328,6 +336,38 @@ export default function AuthPortalPage() {
                       />
                     </div>
                   </div>
+
+                  {/* Gender Selector (Required for Gender-Segregated Bus Seats) */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1.5">
+                      Gender (Required for Bus Seat Allocation) *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, gender: 'male' })}
+                        className={`py-2.5 px-4 rounded-xl text-xs font-extrabold border transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                          form.gender === 'male'
+                            ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                            : 'glass-card text-slate-700 dark:text-slate-200 hover:bg-white/80'
+                        }`}
+                      >
+                        <span>👨 Male</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, gender: 'female' })}
+                        className={`py-2.5 px-4 rounded-xl text-xs font-extrabold border transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                          form.gender === 'female'
+                            ? 'bg-pink-600 text-white border-pink-600 shadow-sm'
+                            : 'glass-card text-slate-700 dark:text-slate-200 hover:bg-white/80'
+                        }`}
+                      >
+                        <span>👩 Female</span>
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Department</label>
@@ -364,7 +404,7 @@ export default function AuthPortalPage() {
                 </>
               )}
 
-              {/* Driver Specific Fields */}
+              {/* Driver Fields */}
               {regRole === 'driver' && (
                 <>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -432,16 +472,27 @@ export default function AuthPortalPage() {
                 </div>
               )}
 
-              {/* Password */}
+              {/* Password + Strength Indicator */}
               <div>
-                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">Create Password *</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                    Create Strong Password (Min 6 chars) *
+                  </label>
+                  {form.password && (
+                    <span className={`text-[10px] font-bold ${
+                      pwdStrength.score >= 3 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600'
+                    }`}>
+                      {pwdStrength.label}
+                    </span>
+                  )}
+                </div>
                 <input
                   type="password"
                   required
-                  minLength={4}
+                  minLength={6}
                   value={form.password}
                   onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  placeholder="Create a strong password (min 4 chars)"
+                  placeholder="Use letters & numbers (min 6 chars)"
                   className="glass-input w-full px-3.5 py-2.5 text-sm"
                 />
               </div>
@@ -451,7 +502,7 @@ export default function AuthPortalPage() {
                 disabled={loading}
                 className="glass-btn-primary w-full py-3.5 rounded-xl font-bold text-sm cursor-pointer disabled:opacity-60"
               >
-                {loading ? 'Saving to Database...' : `Complete ${regRole.toUpperCase()} Registration`}
+                {loading ? 'Securing & Saving Account...' : `Complete ${regRole.toUpperCase()} Registration`}
               </button>
             </form>
           )}
@@ -459,7 +510,7 @@ export default function AuthPortalPage() {
       </main>
 
       <footer className="text-center text-[11px] text-slate-500 dark:text-slate-400 mt-6">
-        Daffodil International University • Smart Campus Transport System
+        Daffodil International University • Zero-Trust Smart Campus Transport OS v4.0
       </footer>
     </div>
   );

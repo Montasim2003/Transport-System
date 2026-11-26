@@ -10,7 +10,7 @@ import ThemeToggle from '@/components/ThemeToggle';
 import LiveBusMap from '@/components/LiveBusMap';
 import BusSeatLayout, { computeBusCapacity, DEFAULT_SEAT_CONFIG } from '@/components/BusSeatLayout';
 import { db } from '@/lib/supabase';
-import { getSession, clearSession, getDashboardPath, hashPassword } from '@/lib/auth';
+import { getVerifiedSession, clearSession, getDashboardPath } from '@/lib/auth';
 
 export default function ControllerDashboard() {
   const router = useRouter();
@@ -39,9 +39,10 @@ export default function ControllerDashboard() {
   const [routeEditDraft, setRouteEditDraft] = useState({ name: '', start_point: '', end_point: '', schedules: '', stoppages: [] });
   const [newStop, setNewStop] = useState({ name: '', offset_min: '15', lat: '23.8500', lng: '90.3350' });
 
-  // Seat Layout Editor State
+  // Seat Layout Editor State (with White/General, Female, Male & Disable Seat Tools)
   const [seatEditBusId, setSeatEditBusId] = useState(null);
   const [seatDraft, setSeatDraft] = useState(DEFAULT_SEAT_CONFIG);
+  const [seatBrush, setSeatBrush] = useState('female'); // 'general' | 'female' | 'male' | 'disable'
 
   // Driver Add/Edit State
   const [driverEditId, setDriverEditId] = useState(null);
@@ -96,13 +97,18 @@ export default function ControllerDashboard() {
   }, [today]);
 
   useEffect(() => {
-    const session = getSession();
-    if (!session) { router.replace('/'); return; }
-    if (session.role !== 'controller') { router.replace(getDashboardPath(session.role)); return; }
-    setUser(session);
-    loadData();
-    const poll = setInterval(loadData, 5000);
-    return () => clearInterval(poll);
+    let active = true;
+    let poll;
+    (async () => {
+      const session = await getVerifiedSession();
+      if (!active) return;
+      if (!session) { router.replace('/'); return; }
+      if (session.role !== 'controller') { router.replace(getDashboardPath(session.role)); return; }
+      setUser(session);
+      loadData();
+      poll = setInterval(loadData, 5000);
+    })();
+    return () => { active = false; if (poll) clearInterval(poll); };
   }, [router, loadData]);
 
   // Select bus in Seat Layout Editor
@@ -112,14 +118,57 @@ export default function ControllerDashboard() {
     setSeatDraft({ ...DEFAULT_SEAT_CONFIG, ...(bus?.seat_config || {}) });
   };
 
-  // Toggle disabled seat in Seat Layout Editor
-  const handleToggleDisableSeat = (seatNum) => {
+  // Apply selected Seat Brush (General/White, Female, Male, or Disable) to clicked seat
+  const handleApplySeatBrush = (seatNum) => {
     setSeatDraft((prev) => {
-      const current = new Set((prev.disabledSeats || []).map(Number));
-      if (current.has(seatNum)) current.delete(seatNum);
-      else current.add(seatNum);
-      return { ...prev, disabledSeats: [...current].sort((a, b) => a - b) };
+      const disabled = new Set((prev.disabledSeats || []).map(Number));
+      const female = new Set((prev.femaleSeats || []).map(Number));
+      const male = new Set((prev.maleSeats || []).map(Number));
+
+      if (seatBrush === 'disable') {
+        if (disabled.has(seatNum)) disabled.delete(seatNum);
+        else {
+          disabled.add(seatNum);
+          female.delete(seatNum);
+          male.delete(seatNum);
+        }
+      } else if (seatBrush === 'female') {
+        disabled.delete(seatNum);
+        male.delete(seatNum);
+        if (female.has(seatNum)) female.delete(seatNum);
+        else female.add(seatNum);
+      } else if (seatBrush === 'male') {
+        disabled.delete(seatNum);
+        female.delete(seatNum);
+        if (male.has(seatNum)) male.delete(seatNum);
+        else male.add(seatNum);
+      } else {
+        // 'general' -> reset seat to default White (unrestricted)
+        disabled.delete(seatNum);
+        female.delete(seatNum);
+        male.delete(seatNum);
+      }
+
+      return {
+        ...prev,
+        disabledSeats: [...disabled].sort((a, b) => a - b),
+        femaleSeats: [...female].sort((a, b) => a - b),
+        maleSeats: [...male].sort((a, b) => a - b),
+      };
     });
+  };
+
+  const applyFrontRowsFemalePreset = (numRows = 3) => {
+    const { gridRows } = computeBusCapacity(seatDraft);
+    const frontNums = gridRows.slice(0, numRows).flatMap((r) => [...r.left, ...r.right]);
+    const disabled = new Set((seatDraft.disabledSeats || []).map(Number));
+    const male = new Set((seatDraft.maleSeats || []).map(Number));
+    frontNums.forEach((n) => male.delete(n));
+    setSeatDraft((prev) => ({
+      ...prev,
+      femaleSeats: frontNums.filter((n) => !disabled.has(n)),
+      maleSeats: [...male],
+    }));
   };
 
   const handleSaveSeatLayout = async () => {
@@ -276,74 +325,41 @@ export default function ControllerDashboard() {
     loadData();
   };
 
-  // Driver CRUD
+  // Driver CRUD via Zero-Trust Server RPC
   const handleSaveDriver = async (e) => {
     e.preventDefault();
     if (!driverForm.name || !driverForm.phone || !driverForm.license_no) return;
-    if (driverEditId) {
-      await db.update('users', driverEditId, {
-        name: driverForm.name.trim(),
-        phone: driverForm.phone.trim(),
-        email: driverForm.email.trim() || `${driverForm.phone.trim()}@driver.diu.edu.bd`,
-        license_no: driverForm.license_no.trim(),
-        helper_name: driverForm.helper_name.trim(),
-        helper_phone: driverForm.helper_phone.trim(),
-        home_address: driverForm.home_address.trim(),
-      });
-      await db.logAudit(user, 'DRIVER_UPDATED', `Updated driver details: ${driverForm.name}`);
-      showToast('✅ Driver & Helper details updated!');
-    } else {
-      const password_hash = await hashPassword(driverForm.password || '1234');
-      const { error } = await db.insert('users', {
-        uni_id: `DRV-${Date.now().toString().slice(-3)}`,
-        username: driverForm.phone.trim(),
-        name: driverForm.name.trim(),
-        email: driverForm.email.trim() || `${driverForm.phone.trim()}@driver.diu.edu.bd`,
-        phone: driverForm.phone.trim(),
-        password_hash,
-        role: 'driver',
-        license_no: driverForm.license_no.trim(),
-        helper_name: driverForm.helper_name.trim(),
-        helper_phone: driverForm.helper_phone.trim(),
-        home_address: driverForm.home_address.trim(),
-      });
-      if (error) { showToast(`⚠️ ${error}`); return; }
-      await db.logAudit(user, 'DRIVER_ADDED', `Added driver ${driverForm.name} (${driverForm.license_no})`);
-      showToast('✅ New Driver & Helper added!');
-    }
+    const action = driverEditId ? 'update' : 'create';
+    const { error } = await db.manageDriver(action, {
+      id: driverEditId,
+      ...driverForm,
+    });
+    if (error) { showToast(`⚠️ ${error}`); return; }
+    showToast(driverEditId ? '✅ Driver & Helper details updated!' : '✅ New Driver & Helper added securely!');
     setDriverEditId(null);
-    setDriverForm({ name: '', phone: '', email: '', license_no: '', helper_name: '', helper_phone: '', home_address: '', password: '1234' });
+    setDriverForm({ name: '', phone: '', email: '', license_no: '', helper_name: '', helper_phone: '', home_address: '', password: '123456' });
     loadData();
   };
 
   const handleDeleteDriver = async (drv) => {
     if (!confirm(`Delete driver ${drv.name}? Their assigned bus will become unassigned.`)) return;
-    // Unassign safely from any bus
-    const assignedBuses = buses.filter((b) => Number(b.driver_id) === Number(drv.id));
-    for (const b of assignedBuses) {
-      await db.update('buses', b.id, { driver_id: null });
-    }
-    await db.remove('users', drv.id);
-    await db.logAudit(user, 'DRIVER_DELETED', `Removed driver ${drv.name}`);
+    const { error } = await db.manageDriver('delete', { id: drv.id });
+    if (error) { showToast(`⚠️ ${error}`); return; }
     showToast('Driver removed safely.');
     loadData();
   };
 
-  // Issue Registration Verification Code
+  // Issue Cryptographically Unique Verification Code via Zero-Trust Server RPC
   const handleIssueCode = async (e) => {
     e.preventDefault();
-    const prefix = codeRole === 'student' ? '2026' : codeRole === 'driver' ? 'DRV-' : 'CTL-';
-    const rand = Math.floor(1000 + Math.random() * 9000);
-    const code = `${prefix}${rand}`;
-    await db.insert('verification_codes', {
-      code,
+    const { data, error } = await db.issueFeeCode({
       role: codeRole,
-      assigned_name: codeAssignedName.trim() || `Verified ${codeRole}`,
-      is_used: false,
-      created_by: user.name,
+      assigned_uni_id: codeRole === 'student' ? codeAssignedName.trim() : '',
+      assigned_name: codeRole !== 'student' ? codeAssignedName.trim() : '',
     });
+    if (error || !data) { showToast(`⚠️ ${error || 'Failed to issue code'}`); return; }
     setCodeAssignedName('');
-    showToast(`🔑 Generated ${codeRole.toUpperCase()} Code: ${code}`);
+    showToast(`🔑 Generated Unique ${codeRole.toUpperCase()} Code: ${data.code}`);
     loadData();
   };
 
@@ -992,29 +1008,92 @@ export default function ControllerDashboard() {
                 Include Full Rear Bench Row
               </label>
 
-              {/* Quick Presets */}
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSeatDraft({ rows: 10, leftCols: 2, rightCols: 2, backBench: false, disabledSeats: [] })}
-                  className="glass-btn px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
-                >
-                  Standard 2+2 (40)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSeatDraft({ rows: 9, leftCols: 2, rightCols: 3, backBench: true, disabledSeats: [] })}
-                  className="glass-btn px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
-                >
-                  Large Coach 2+3 (51)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSeatDraft({ rows: 9, leftCols: 1, rightCols: 2, backBench: false, disabledSeats: [] })}
-                  className="glass-btn px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
-                >
-                  AC Minibus 1+2 (27)
-                </button>
+              {/* Gender Seat Brush Selector */}
+              <div className="space-y-2 pt-1">
+                <div className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                  1. Pick Seat Tool & Click Seats on Bus Preview:
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSeatBrush('female')}
+                    className={`py-2 px-3 rounded-xl text-xs font-extrabold border cursor-pointer ${
+                      seatBrush === 'female'
+                        ? 'bg-pink-600 text-white border-pink-600 shadow-sm'
+                        : 'glass-card text-pink-700 dark:text-pink-300'
+                    }`}
+                  >
+                    👩 Female Reserved (Pink)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSeatBrush('male')}
+                    className={`py-2 px-3 rounded-xl text-xs font-extrabold border cursor-pointer ${
+                      seatBrush === 'male'
+                        ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                        : 'glass-card text-sky-700 dark:text-sky-300'
+                    }`}
+                  >
+                    👨 Male Reserved (Blue)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSeatBrush('general')}
+                    className={`py-2 px-3 rounded-xl text-xs font-extrabold border cursor-pointer ${
+                      seatBrush === 'general'
+                        ? 'bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900'
+                        : 'glass-card text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    ⚪ White / General (Any)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSeatBrush('disable')}
+                    className={`py-2 px-3 rounded-xl text-xs font-extrabold border cursor-pointer ${
+                      seatBrush === 'disable'
+                        ? 'bg-rose-600 text-white border-rose-600'
+                        : 'glass-card text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    🚫 Disable / Remove Seat
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Gender & Layout Presets */}
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-bold text-slate-500">Quick Presets:</div>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => applyFrontRowsFemalePreset(3)}
+                    className="px-2.5 py-1.5 rounded-lg bg-pink-500/15 border border-pink-500/40 text-pink-700 dark:text-pink-300 text-[11px] font-bold cursor-pointer"
+                  >
+                    Front 3 Rows Female
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSeatDraft((p) => ({ ...p, femaleSeats: [], maleSeats: [] }))}
+                    className="glass-btn px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
+                  >
+                    Reset All White
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSeatDraft({ rows: 10, leftCols: 2, rightCols: 2, backBench: false, disabledSeats: [], femaleSeats: [], maleSeats: [] })}
+                    className="glass-btn px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
+                  >
+                    Standard 2+2 (40)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSeatDraft({ rows: 9, leftCols: 2, rightCols: 3, backBench: true, disabledSeats: [], femaleSeats: [], maleSeats: [] })}
+                    className="glass-btn px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
+                  >
+                    Large 2+3 (51)
+                  </button>
+                </div>
               </div>
 
               <button
@@ -1030,7 +1109,7 @@ export default function ControllerDashboard() {
                 busNumber={buses.find((b) => Number(b.id) === Number(seatEditBusId))?.bus_number || 'Bus'}
                 seatConfig={seatDraft}
                 mode="edit"
-                onToggleDisableSeat={handleToggleDisableSeat}
+                onEditSeatClick={handleApplySeatBrush}
               />
             </div>
           </div>
@@ -1079,7 +1158,7 @@ export default function ControllerDashboard() {
                     <option value="driver">Driver Code</option>
                     <option value="controller">Controller Code</option>
                   </select>
-                  <input type="text" value={codeAssignedName} onChange={(e) => setCodeAssignedName(e.target.value)} placeholder="Recipient Name" className="glass-input px-3 py-2 text-xs" />
+                  <input type="text" value={codeAssignedName} onChange={(e) => setCodeAssignedName(e.target.value)} placeholder={codeRole === "student" ? "Student ID (e.g. 241-35-489)" : "Staff Name"} className="glass-input px-3 py-2 text-xs" />
                 </div>
                 <button type="submit" className="glass-btn-primary w-full py-2.5 rounded-xl text-xs font-bold cursor-pointer">
                   Generate New Code

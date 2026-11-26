@@ -8,7 +8,7 @@ import {
 import ThemeToggle from '@/components/ThemeToggle';
 import LiveBusMap from '@/components/LiveBusMap';
 import { db } from '@/lib/supabase';
-import { getSession, clearSession, getDashboardPath } from '@/lib/auth';
+import { getVerifiedSession, clearSession, getDashboardPath } from '@/lib/auth';
 
 export default function DriverDashboard() {
   const router = useRouter();
@@ -46,7 +46,7 @@ export default function DriverDashboard() {
     setControllers(uList.filter((u) => u.role === 'controller'));
     setNotices(nList);
 
-    const activeUser = sessionUser || getSession();
+    const activeUser = sessionUser || (await getVerifiedSession());
     setSelectedBusId((prev) => {
       if (prev && bList.some((b) => Number(b.id) === Number(prev))) return prev;
       const assigned = bList.find((b) => Number(b.driver_id) === Number(activeUser?.id));
@@ -55,20 +55,26 @@ export default function DriverDashboard() {
   }, [today]);
 
   useEffect(() => {
-    const session = getSession();
-    if (!session) {
-      router.replace('/');
-      return;
-    }
-    if (session.role !== 'driver') {
-      router.replace(getDashboardPath(session.role));
-      return;
-    }
-    setUser(session);
-    loadData(session);
-    const poll = setInterval(() => loadData(session), 5000);
+    let active = true;
+    let poll;
+    (async () => {
+      const session = await getVerifiedSession();
+      if (!active) return;
+      if (!session) {
+        router.replace('/');
+        return;
+      }
+      if (session.role !== 'driver') {
+        router.replace(getDashboardPath(session.role));
+        return;
+      }
+      setUser(session);
+      loadData(session);
+      poll = setInterval(() => loadData(session), 5000);
+    })();
     return () => {
-      clearInterval(poll);
+      active = false;
+      if (poll) clearInterval(poll);
       if (watchIdRef.current && navigator.geolocation) {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }

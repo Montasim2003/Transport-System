@@ -3,13 +3,14 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Bus, MapPin, Clock, LogOut, PhoneCall, AlertTriangle, QrCode,
-  Trash2, CheckCircle2, ShieldAlert, Megaphone, RefreshCw, User
+  Trash2, ShieldAlert, Megaphone, RefreshCw
 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
 import LiveBusMap from '@/components/LiveBusMap';
 import BusSeatLayout, { computeBusCapacity } from '@/components/BusSeatLayout';
 import { db } from '@/lib/supabase';
-import { getSession, clearSession, getDashboardPath } from '@/lib/auth';
+import { getVerifiedSession, clearSession, getDashboardPath } from '@/lib/auth';
+import { sanitizeText } from '@/lib/security';
 
 export default function StudentDashboard() {
   const router = useRouter();
@@ -56,29 +57,33 @@ export default function StudentDashboard() {
   }, [today]);
 
   useEffect(() => {
-    const session = getSession();
-    if (!session) {
-      router.replace('/');
-      return;
-    }
-    if (session.role !== 'student') {
-      router.replace(getDashboardPath(session.role));
-      return;
-    }
-    setUser(session);
-    loadData();
+    let active = true;
+    let poll, clock;
+    (async () => {
+      const session = await getVerifiedSession();
+      if (!active) return;
+      if (!session) {
+        router.replace('/');
+        return;
+      }
+      if (session.role !== 'student') {
+        router.replace(getDashboardPath(session.role));
+        return;
+      }
+      setUser(session);
+      loadData();
 
-    // Live polling every 4 seconds for real-time bus GPS & multi-device seat sync
-    const poll = setInterval(loadData, 4000);
-    // Anti-screenshot live ticking clock for QR Boarding Pass
-    const clock = setInterval(() => {
+      poll = setInterval(loadData, 4000);
+      clock = setInterval(() => {
+        setNowClock(new Date().toLocaleTimeString('en-BD', { hour12: true }));
+      }, 1000);
       setNowClock(new Date().toLocaleTimeString('en-BD', { hour12: true }));
-    }, 1000);
-    setNowClock(new Date().toLocaleTimeString('en-BD', { hour12: true }));
+    })();
 
     return () => {
-      clearInterval(poll);
-      clearInterval(clock);
+      active = false;
+      if (poll) clearInterval(poll);
+      if (clock) clearInterval(clock);
     };
   }, [router, loadData]);
 
@@ -105,11 +110,11 @@ export default function StudentDashboard() {
   );
   const myBooking = currentSlotBookings.find((b) => Number(b.student_id) === Number(user?.id));
   const bookedSeatNumbers = currentSlotBookings.map((b) => Number(b.seat_number));
-  const { totalSeats } = computeBusCapacity(selectedBus?.seat_config);
+  const { cfg: activeSeatCfg, totalSeats } = computeBusCapacity(selectedBus?.seat_config);
 
   const showToast = (msg) => {
     setToast(msg);
-    setTimeout(() => setToast(''), 4000);
+    setTimeout(() => setToast(''), 4500);
   };
 
   const handleBookSeat = async (seatNum) => {
@@ -118,34 +123,43 @@ export default function StudentDashboard() {
       showToast(`You already booked Seat #${myBooking.seat_number} for this trip. Cancel it first to switch.`);
       return;
     }
-    const token = `DIU-${selectedBus.bus_number}-S${seatNum}-${user.uni_id || user.id}-${Date.now().toString().slice(-4)}`;
-    const { error } = await db.insert('bookings', {
-      student_id: user.id,
-      student_name: user.name,
-      student_uni_id: user.uni_id || `STU-${user.id}`,
-      student_dept: user.department || 'N/A',
-      student_batch: user.batch || 'N/A',
+
+    // Zero-Trust Client + Server Gender Enforcement
+    const femaleSet = new Set((activeSeatCfg.femaleSeats || []).map(Number));
+    const maleSet = new Set((activeSeatCfg.maleSeats || []).map(Number));
+    const userGender = String(user.gender || '').toLowerCase();
+
+    if (femaleSet.has(Number(seatNum)) && userGender !== 'female') {
+      await db.logAudit(user, 'GENDER_SEAT_BLOCKED', `Male student ${user.name} blocked from Female seat #${seatNum} on ${selectedBus.bus_number}.`);
+      showToast(`🚫 Seat #${seatNum} is reserved exclusively for Female students!`);
+      return;
+    }
+    if (maleSet.has(Number(seatNum)) && userGender !== 'male') {
+      await db.logAudit(user, 'GENDER_SEAT_BLOCKED', `Female student ${user.name} blocked from Male seat #${seatNum} on ${selectedBus.bus_number}.`);
+      showToast(`🚫 Seat #${seatNum} is reserved exclusively for Male students!`);
+      return;
+    }
+
+    const { error } = await db.bookSeat({
       bus_id: selectedBus.id,
       route_id: selectedBus.route_id,
       schedule_time: selectedTime,
       seat_number: seatNum,
       booking_date: today,
-      qr_token: token,
     });
     if (error) {
       showToast(`⚠️ ${error}`);
       await loadData();
       return;
     }
-    await db.logAudit(user, 'SEAT_BOOKED', `${user.name} booked Seat #${seatNum} on ${selectedBus.bus_number} (${selectedTime}).`);
     showToast(`✅ Confirmed! Seat #${seatNum} booked on ${selectedBus.bus_number}.`);
     await loadData();
   };
 
   const handleCancelSeat = async () => {
     if (!myBooking) return;
-    await db.remove('bookings', myBooking.id);
-    await db.logAudit(user, 'SEAT_CANCELLED', `${user.name} cancelled Seat #${myBooking.seat_number} on ${selectedBus?.bus_number}.`);
+    const { error } = await db.cancelBooking(myBooking.id);
+    if (error) { showToast(`⚠️ ${error}`); return; }
     showToast('Seat booking cancelled.');
     await loadData();
   };
@@ -164,8 +178,8 @@ export default function StudentDashboard() {
       guardian_phone: user.guardian_phone || 'Not Provided',
       bus_id: selectedBus?.id || null,
       bus_number: selectedBus?.bus_number || 'General Campus',
-      category: sosCategory,
-      message: sosMessage || 'Urgent assistance needed immediately!',
+      category: sanitizeText(sosCategory, 50),
+      message: sanitizeText(sosMessage, 250) || 'Urgent assistance needed immediately!',
       lat: selectedBus?.current_lat || 23.8769,
       lng: selectedBus?.current_lng || 90.3202,
       status: 'active',
@@ -187,20 +201,29 @@ export default function StudentDashboard() {
   return (
     <div className="min-h-screen pb-14 px-3 sm:px-6 pt-4">
       <div className="max-w-6xl mx-auto space-y-5">
-        {/* Top Liquid Glass Header */}
+        {/* Header */}
         <header className="glass-panel px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-2xl bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 flex items-center justify-center shadow-sm">
               <Bus className="w-6 h-6" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-base sm:text-lg font-extrabold text-slate-800 dark:text-white">
                   {user.name}
                 </h1>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200/80 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
                   {user.uni_id || 'Student'} • {user.department || 'DIU'} {user.batch ? `B-${user.batch}` : ''}
                 </span>
+                {user.gender && (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                    user.gender === 'female'
+                      ? 'bg-pink-500/20 text-pink-700 dark:text-pink-300 border border-pink-500/40'
+                      : 'bg-sky-500/20 text-sky-700 dark:text-sky-300 border border-sky-500/40'
+                  }`}>
+                    {user.gender}
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">{user.email}</p>
             </div>
@@ -228,7 +251,7 @@ export default function StudentDashboard() {
           </div>
         </header>
 
-        {/* Live Broadcast Notice Banner */}
+        {/* Live Notice */}
         {notices[0] && (
           <div className={`glass-card px-4 py-3 flex items-start gap-3 border-l-4 ${
             notices[0].priority === 'urgent' ? 'border-l-rose-500' : 'border-l-slate-600 dark:border-l-slate-300'
@@ -247,11 +270,11 @@ export default function StudentDashboard() {
           </div>
         )}
 
-        {/* Step 1: Bus Selector (Bus-01, Bus-02, Bus-03...) */}
+        {/* Step 1: Bus Selector */}
         <section className="glass-card p-4 sm:p-5">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h2 className="text-sm font-extrabold text-slate-800 dark:text-white flex items-center gap-2">
-              <Bus className="w-4 h-4" /> 1. Select Bus & Schedule (Live Location Updates Automatically)
+              <Bus className="w-4 h-4" /> 1. Select Bus & Schedule
             </h2>
             <div className="flex flex-wrap gap-1.5">
               {schedules.map((t) => (
@@ -274,7 +297,7 @@ export default function StudentDashboard() {
             {buses.map((bus) => {
               const r = routes.find((rt) => Number(rt.id) === Number(bus.route_id));
               const active = Number(selectedBus?.id) === Number(bus.id);
-              const cap = computeBusCapacity(bus.seat_config).totalSeats;
+              const { totalSeats: cap, cfg: bCfg } = computeBusCapacity(bus.seat_config);
               return (
                 <button
                   key={bus.id}
@@ -293,7 +316,7 @@ export default function StudentDashboard() {
                     {r?.name || 'Route Unassigned'}
                   </div>
                   <div className={`text-[10px] mt-1.5 flex items-center justify-between ${active ? 'opacity-80' : 'text-slate-400'}`}>
-                    <span>{cap} Seats</span>
+                    <span>{cap} Seats {bCfg.femaleSeats.length > 0 ? '• F-Zone' : ''}</span>
                     <span>{bus.status === 'active' ? `${bus.speed_kmh || 0} km/h` : 'Standby'}</span>
                   </div>
                 </button>
@@ -302,9 +325,9 @@ export default function StudentDashboard() {
           </div>
         </section>
 
-        {/* Main 2-Column Layout: Live Map + Stoppages | Seat Grid + QR Pass */}
+        {/* Main 2-Column Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* Left Column: Selected Bus Live GPS Map + Stoppages + Controller Contacts */}
+          {/* Left: Map + Stoppages + Controller Hotline */}
           <div className="lg:col-span-7 space-y-5">
             <div className="glass-card p-4 sm:p-5">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
@@ -333,7 +356,6 @@ export default function StudentDashboard() {
                 height="320px"
               />
 
-              {/* Route Stoppages Chips (Edited Live by Controller) */}
               {selectedRoute?.stoppages?.length > 0 && (
                 <div className="mt-4">
                   <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">
@@ -354,7 +376,6 @@ export default function StudentDashboard() {
               )}
             </div>
 
-            {/* Controller Hotline & Emergency Contacts for Student */}
             <div className="glass-card p-4 sm:p-5">
               <h3 className="text-sm font-extrabold text-slate-800 dark:text-white mb-3 flex items-center gap-2">
                 <PhoneCall className="w-4 h-4" /> Transport Controller Support Hotline
@@ -378,12 +399,12 @@ export default function StudentDashboard() {
                 ))}
               </div>
               <div className="mt-3 text-[11px] text-slate-500 dark:text-slate-400">
-                Your Registered Guardian Emergency Contact: <b className="text-slate-700 dark:text-slate-200">{user.guardian_phone || 'Not Set'}</b> (Shared automatically with Controller during SOS).
+                Guardian Emergency Contact: <b className="text-slate-700 dark:text-slate-200">{user.guardian_phone || 'Not Set'}</b>
               </div>
             </div>
           </div>
 
-          {/* Right Column: Dynamic Bus Seat Booking + Anti-Screenshot QR Boarding Pass */}
+          {/* Right: Seat Booking + QR Boarding Pass */}
           <div className="lg:col-span-5 space-y-5">
             {myBooking && (
               <div className="glass-panel p-4 sm:p-5 border-2 border-emerald-500/40">
@@ -392,7 +413,7 @@ export default function StudentDashboard() {
                     <QrCode className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
                     <div>
                       <h3 className="text-sm font-extrabold text-slate-800 dark:text-white">Live QR Boarding Pass</h3>
-                      <p className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400">Anti-Screenshot Live Clock: {nowClock}</p>
+                      <p className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400">Live Clock: {nowClock}</p>
                     </div>
                   </div>
                   <button
@@ -412,7 +433,6 @@ export default function StudentDashboard() {
                     <div className="text-[11px] text-slate-500">{selectedRoute?.name} • {selectedTime}</div>
                     <div className="text-[10px] font-mono text-slate-400">Token: {myBooking.qr_token}</div>
                   </div>
-                  {/* Crisp Geometric QR Badge */}
                   <div className="w-20 h-20 shrink-0 rounded-xl bg-slate-900 text-white p-2 flex flex-col items-center justify-center">
                     <QrCode className="w-12 h-12" />
                     <span className="text-[8px] font-mono mt-0.5">VERIFIED</span>
@@ -439,6 +459,7 @@ export default function StudentDashboard() {
                   seatConfig={selectedBus.seat_config}
                   bookedSeats={bookedSeatNumbers}
                   mySeat={myBooking?.seat_number || null}
+                  studentGender={String(user.gender || '').toLowerCase()}
                   mode="book"
                   onSelectSeat={handleBookSeat}
                 />
@@ -448,7 +469,7 @@ export default function StudentDashboard() {
         </div>
       </div>
 
-      {/* Live SOS Emergency Modal */}
+      {/* SOS Modal */}
       {sosOpen && (
         <div className="fixed inset-0 z-[1000] bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
           <form onSubmit={handleTriggerSOS} className="glass-panel max-w-md w-full p-6 space-y-4 border-2 border-rose-500/50">
