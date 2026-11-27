@@ -4,8 +4,9 @@ import { useRouter } from 'next/navigation';
 import {
   Radio, Bus, MapPin, Route, Armchair, Users, AlertTriangle, LogOut,
   Plus, Trash2, Edit3, Save, PhoneCall, Megaphone, CheckCircle2,
-  ShieldAlert, KeyRound, RefreshCw, Eye
+  ShieldAlert, KeyRound, RefreshCw, Eye, Clock, ArrowRightLeft
 } from 'lucide-react';
+import { formatHHMMTo12h, offsetDhakaHHMM, evaluateBusBookingWindow } from '@/lib/schedule';
 import ThemeToggle from '@/components/ThemeToggle';
 import LiveBusMap from '@/components/LiveBusMap';
 import BusSeatLayout, { computeBusCapacity, DEFAULT_SEAT_CONFIG } from '@/components/BusSeatLayout';
@@ -31,7 +32,8 @@ export default function ControllerDashboard() {
   const [noticeForm, setNoticeForm] = useState({ title: '', message: '', priority: 'normal' });
 
   // Add Bus Form
-  const [newBus, setNewBus] = useState({ bus_number: '', plate_no: '', route_id: '', driver_id: '', fitness_expiry: '2027-12-31' });
+  const [newBus, setNewBus] = useState({ bus_number: '', plate_no: '', route_id: '', driver_id: '', trip_direction: 'from_campus', departure_time: '14:20', booking_window_mins: 20, fitness_expiry: '2027-12-31' });
+  const [busTimeDrafts, setBusTimeDrafts] = useState({});
 
   // Route & Stoppage Editor State
   const [newRoute, setNewRoute] = useState({ name: '', start_point: '', end_point: 'DIU Smart City', schedules: '07:15 AM, 01:30 PM, 04:30 PM' });
@@ -71,6 +73,18 @@ export default function ControllerDashboard() {
       db.getAll('verification_codes', 'id', false),
     ]);
     setBuses(bList);
+    setBusTimeDrafts((prev) => {
+      const next = { ...prev };
+      bList.forEach((b) => {
+        if (!next[b.id]) {
+          next[b.id] = {
+            departure_time: b.departure_time || '14:20',
+            booking_window_mins: Number(b.booking_window_mins) || 20,
+          };
+        }
+      });
+      return next;
+    });
     setRoutes(rList);
     setDrivers(uList.filter((u) => u.role === 'driver'));
     setBookings(bkList.filter((b) => !b.booking_date || b.booking_date === today));
@@ -208,6 +222,9 @@ export default function ControllerDashboard() {
       route_id: newBus.route_id ? Number(newBus.route_id) : null,
       driver_id: newBus.driver_id ? Number(newBus.driver_id) : null,
       status: 'standby',
+      trip_direction: newBus.trip_direction || 'from_campus',
+      departure_time: newBus.departure_time || '14:20',
+      booking_window_mins: Number(newBus.booking_window_mins) || 20,
       current_lat: 23.8769,
       current_lng: 90.3202,
       speed_kmh: 0,
@@ -216,7 +233,7 @@ export default function ControllerDashboard() {
     });
     if (error) { showToast(`⚠️ ${error}`); return; }
     await db.logAudit(user, 'BUS_ADDED', `Added ${newBus.bus_number} to DIU fleet.`);
-    setNewBus({ bus_number: '', plate_no: '', route_id: '', driver_id: '', fitness_expiry: '2027-12-31' });
+    setNewBus({ bus_number: '', plate_no: '', route_id: '', driver_id: '', trip_direction: 'from_campus', departure_time: '14:20', booking_window_mins: 20, fitness_expiry: '2027-12-31' });
     showToast(`🚌 New bus added successfully!`);
     loadData();
   };
@@ -656,6 +673,28 @@ export default function ControllerDashboard() {
                   {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} ({d.phone})</option>)}
                 </select>
               </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500">Trip Direction</label>
+                  <select
+                    value={newBus.trip_direction}
+                    onChange={(e) => setNewBus({ ...newBus, trip_direction: e.target.value })}
+                    className="glass-input w-full px-2.5 py-2 text-xs mt-1 font-bold"
+                  >
+                    <option value="from_campus">DIU → City (Departure)</option>
+                    <option value="to_campus">City → DIU (Incoming)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500">Campus Departure Time</label>
+                  <input
+                    type="time"
+                    value={newBus.departure_time}
+                    onChange={(e) => setNewBus({ ...newBus, departure_time: e.target.value })}
+                    className="glass-input w-full px-2.5 py-2 text-xs mt-1 font-bold"
+                  />
+                </div>
+              </div>
               <button type="submit" className="glass-btn-primary w-full py-2.5 rounded-xl text-xs font-bold cursor-pointer">
                 Add Bus to Fleet
               </button>
@@ -664,62 +703,185 @@ export default function ControllerDashboard() {
             <div className="lg:col-span-8 space-y-3">
               {buses.map((b) => {
                 const cap = computeBusCapacity(b.seat_config).totalSeats;
+                const draft = busTimeDrafts[b.id] || {
+                  departure_time: b.departure_time || '14:20',
+                  booking_window_mins: Number(b.booking_window_mins) || 20,
+                };
+                const winState = evaluateBusBookingWindow(b);
+                const isFromCampus = (b.trip_direction || 'from_campus') === 'from_campus';
+
+                const applyQuickSchedule = async (offsetMins, label) => {
+                  const targetHHMM = offsetDhakaHHMM(offsetMins);
+                  setBusTimeDrafts((p) => ({
+                    ...p,
+                    [b.id]: { ...draft, departure_time: targetHHMM, booking_window_mins: 20 },
+                  }));
+                  await handleUpdateBusField(
+                    b.id,
+                    { trip_direction: 'from_campus', departure_time: targetHHMM, booking_window_mins: 20 },
+                    `${b.bus_number} departure set to ${formatHHMMTo12h(targetHHMM)} (${label})`
+                  );
+                };
+
                 return (
-                  <div key={b.id} className="glass-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-extrabold text-slate-800 dark:text-white">🚌 {b.bus_number}</span>
-                        <span className="text-[11px] text-slate-500">{b.plate_no}</span>
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200/80 dark:bg-slate-700">
-                          {cap} Seats
-                        </span>
+                  <div key={b.id} className="glass-card p-4 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-extrabold text-slate-800 dark:text-white">🚌 {b.bus_number}</span>
+                          <span className="text-[11px] text-slate-500">{b.plate_no}</span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200/80 dark:bg-slate-700">
+                            {cap} Seats
+                          </span>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                            isFromCampus
+                              ? winState.state === 'open_now'
+                                ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                                : 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                              : 'bg-sky-500/20 text-sky-700 dark:text-sky-300'
+                          }`}>
+                            {isFromCampus ? `DIU → City • ${winState.label}` : 'City → DIU (Live Track)'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          Fitness Valid Until: {b.fitness_expiry || '2027-06-30'}
+                        </div>
                       </div>
-                      <div className="text-[11px] text-slate-500 mt-1">
-                        Fitness Valid Until: {b.fitness_expiry || '2027-06-30'}
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={b.route_id || ''}
+                          onChange={(e) => handleUpdateBusField(b.id, { route_id: e.target.value ? Number(e.target.value) : null }, `${b.bus_number} route`)}
+                          className="glass-input px-2.5 py-1.5 text-xs font-semibold"
+                          title="Change Bus Route"
+                        >
+                          <option value="">No Route</option>
+                          {routes.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                        </select>
+
+                        <select
+                          value={b.driver_id || ''}
+                          onChange={(e) => handleUpdateBusField(b.id, { driver_id: e.target.value ? Number(e.target.value) : null }, `${b.bus_number} driver`)}
+                          className="glass-input px-2.5 py-1.5 text-xs font-semibold"
+                          title="Assign Driver"
+                        >
+                          <option value="">No Driver</option>
+                          {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                        </select>
+
+                        <select
+                          value={b.status || 'standby'}
+                          onChange={(e) => handleUpdateBusField(b.id, { status: e.target.value }, `${b.bus_number} status`)}
+                          className="glass-input px-2.5 py-1.5 text-xs font-bold"
+                        >
+                          <option value="active">Active</option>
+                          <option value="standby">Standby</option>
+                          <option value="maintenance">Maintenance</option>
+                        </select>
+
+                        <button
+                          onClick={() => handleDeleteBus(b)}
+                          className="p-2 rounded-xl bg-rose-500/15 text-rose-600 hover:bg-rose-500/25 cursor-pointer"
+                          title="Delete Bus"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
-                      {/* Change Bus Route Instantly */}
-                      <select
-                        value={b.route_id || ''}
-                        onChange={(e) => handleUpdateBusField(b.id, { route_id: e.target.value ? Number(e.target.value) : null }, `${b.bus_number} route`)}
-                        className="glass-input px-2.5 py-1.5 text-xs font-semibold"
-                        title="Change Bus Route"
-                      >
-                        <option value="">No Route</option>
-                        {routes.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-                      </select>
+                    {/* CAMPUS DEPARTURE TIME & 20-MIN BOOKING WINDOW CONTROLLER */}
+                    <div className="pt-3 border-t border-slate-300/50 dark:border-slate-700/60 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-extrabold text-slate-600 dark:text-slate-300 flex items-center gap-1">
+                          <ArrowRightLeft className="w-3.5 h-3.5" /> Trip Mode:
+                        </span>
+                        <select
+                          value={b.trip_direction || 'from_campus'}
+                          onChange={(e) => handleUpdateBusField(b.id, { trip_direction: e.target.value }, `${b.bus_number} trip direction`)}
+                          className="glass-input px-2.5 py-1.5 text-xs font-bold"
+                        >
+                          <option value="from_campus">Leaving DIU Campus (20m Booking Lock)</option>
+                          <option value="to_campus">Coming to DIU Campus (Live GPS Track)</option>
+                        </select>
 
-                      {/* Change Bus Driver Instantly */}
-                      <select
-                        value={b.driver_id || ''}
-                        onChange={(e) => handleUpdateBusField(b.id, { driver_id: e.target.value ? Number(e.target.value) : null }, `${b.bus_number} driver`)}
-                        className="glass-input px-2.5 py-1.5 text-xs font-semibold"
-                        title="Assign Driver"
-                      >
-                        <option value="">No Driver</option>
-                        {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                      </select>
+                        {isFromCampus && (
+                          <>
+                            <span className="font-bold text-slate-500 flex items-center gap-1 ml-1">
+                              <Clock className="w-3.5 h-3.5" /> Departs DIU:
+                            </span>
+                            <input
+                              type="time"
+                              value={draft.departure_time}
+                              onChange={(e) =>
+                                setBusTimeDrafts((p) => ({
+                                  ...p,
+                                  [b.id]: { ...draft, departure_time: e.target.value },
+                                }))
+                              }
+                              className="glass-input px-2.5 py-1 text-xs font-mono font-bold"
+                            />
+                            <select
+                              value={draft.booking_window_mins}
+                              onChange={(e) =>
+                                setBusTimeDrafts((p) => ({
+                                  ...p,
+                                  [b.id]: { ...draft, booking_window_mins: Number(e.target.value) },
+                                }))
+                              }
+                              className="glass-input px-2 py-1 text-xs font-bold"
+                              title="How many minutes before departure booking opens"
+                            >
+                              <option value={15}>Opens 15m before</option>
+                              <option value={20}>Opens 20m before</option>
+                              <option value={30}>Opens 30m before</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateBusField(
+                                  b.id,
+                                  {
+                                    trip_direction: 'from_campus',
+                                    departure_time: draft.departure_time,
+                                    booking_window_mins: draft.booking_window_mins,
+                                  },
+                                  `${b.bus_number} leaves DIU at ${formatHHMMTo12h(draft.departure_time)}`
+                                )
+                              }
+                              className="glass-btn-primary px-3 py-1.5 rounded-lg text-[11px] font-extrabold cursor-pointer flex items-center gap-1"
+                            >
+                              <Save className="w-3 h-3" /> Set Time
+                            </button>
+                          </>
+                        )}
+                      </div>
 
-                      {/* Status */}
-                      <select
-                        value={b.status || 'standby'}
-                        onChange={(e) => handleUpdateBusField(b.id, { status: e.target.value }, `${b.bus_number} status`)}
-                        className="glass-input px-2.5 py-1.5 text-xs font-bold"
-                      >
-                        <option value="active">Active</option>
-                        <option value="standby">Standby</option>
-                        <option value="maintenance">Maintenance</option>
-                      </select>
-
-                      <button
-                        onClick={() => handleDeleteBus(b)}
-                        className="p-2 rounded-xl bg-rose-500/15 text-rose-600 hover:bg-rose-500/25 cursor-pointer"
-                        title="Delete Bus"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {isFromCampus && (
+                        <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                          <span className="font-bold text-slate-400 uppercase">Quick Set:</span>
+                          <button
+                            type="button"
+                            onClick={() => applyQuickSchedule(15, 'Open Now')}
+                            className="px-2 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-700 dark:text-emerald-300 font-bold cursor-pointer"
+                          >
+                            Open Booking Now (+15m)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyQuickSchedule(21, 'Opens in 1 min')}
+                            className="px-2 py-1 rounded-lg bg-sky-500/15 border border-sky-500/35 text-sky-700 dark:text-sky-300 font-bold cursor-pointer"
+                          >
+                            Unlock in ~1 Min (+21m)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyQuickSchedule(35, 'Locked Countdown')}
+                            className="px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-500/35 text-amber-700 dark:text-amber-300 font-bold cursor-pointer"
+                          >
+                            Locked Demo (+35m)
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

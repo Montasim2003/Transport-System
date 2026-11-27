@@ -1,9 +1,10 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Bus, MapPin, Clock, LogOut, PhoneCall, AlertTriangle, QrCode,
-  Trash2, ShieldAlert, Megaphone, RefreshCw
+  Trash2, ShieldAlert, Megaphone, RefreshCw, Bell, BellRing, BellOff,
+  Lock, Navigation, CheckCircle2, Sparkles
 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
 import LiveBusMap from '@/components/LiveBusMap';
@@ -11,6 +12,32 @@ import BusSeatLayout, { computeBusCapacity } from '@/components/BusSeatLayout';
 import { db } from '@/lib/supabase';
 import { getVerifiedSession, clearSession, getDashboardPath } from '@/lib/auth';
 import { sanitizeText } from '@/lib/security';
+import {
+  getDhakaClock,
+  evaluateBusBookingWindow,
+  getAllCityStoppages,
+  busServesStoppage,
+  formatHHMMTo12h,
+} from '@/lib/schedule';
+
+function playGentleChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1174.66, ctx.currentTime + 0.16);
+    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.36);
+  } catch {}
+}
 
 export default function StudentDashboard() {
   const router = useRouter();
@@ -23,9 +50,17 @@ export default function StudentDashboard() {
   const [drivers, setDrivers] = useState([]);
 
   const [selectedBusId, setSelectedBusId] = useState(null);
-  const [selectedTime, setSelectedTime] = useState('01:30 PM');
+  const [selectedTime, setSelectedTime] = useState('02:20 PM');
   const [toast, setToast] = useState('');
+  const [tick, setTick] = useState(0); // 1-second reactive clock tick for countdown & auto-unlock
   const [nowClock, setNowClock] = useState('');
+
+  // Student Preferred Area / Stoppage & Targeted Phone Notifications
+  const [preferredStoppage, setPreferredStoppage] = useState('');
+  const [alertsEnabled, setAlertsEnabled] = useState(true);
+  const [notifPermission, setNotifPermission] = useState('default');
+  const [savingArea, setSavingArea] = useState(false);
+  const [liveBookingAlert, setLiveBookingAlert] = useState(null); // In-app alert banner for targeted bus
 
   // SOS Modal
   const [sosOpen, setSosOpen] = useState(false);
@@ -33,7 +68,13 @@ export default function StudentDashboard() {
   const [sosMessage, setSosMessage] = useState('');
   const [sosSending, setSosSending] = useState(false);
 
+  const alertedKeysRef = useRef(new Set());
   const today = new Date().toISOString().slice(0, 10);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 4500);
+  };
 
   const loadData = useCallback(async () => {
     const [bList, rList, bkList, uList, nList] = await Promise.all([
@@ -71,13 +112,24 @@ export default function StudentDashboard() {
         return;
       }
       setUser(session);
+
+      // Restore student's saved stoppage & notification preference
+      const savedStop = session.preferred_stoppage || localStorage.getItem('diu_pref_stoppage_v42') || '';
+      setPreferredStoppage(savedStop);
+      setAlertsEnabled(session.notifications_enabled !== false);
+
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        setNotifPermission(Notification.permission);
+      }
+
       loadData();
 
       poll = setInterval(loadData, 4000);
       clock = setInterval(() => {
-        setNowClock(new Date().toLocaleTimeString('en-BD', { hour12: true }));
+        setNowClock(getDhakaClock().formatted12h);
+        setTick((t) => t + 1);
       }, 1000);
-      setNowClock(new Date().toLocaleTimeString('en-BD', { hour12: true }));
+      setNowClock(getDhakaClock().formatted12h);
     })();
 
     return () => {
@@ -87,6 +139,123 @@ export default function StudentDashboard() {
     };
   }, [router, loadData]);
 
+  const allStoppages = useMemo(() => getAllCityStoppages(routes), [routes]);
+
+  // Buses that specifically pass through the student's selected area/stoppage
+  const myAreaBuses = useMemo(() => {
+    if (!preferredStoppage) return [];
+    return buses.filter((b) => busServesStoppage(b, routes, preferredStoppage));
+  }, [buses, routes, preferredStoppage]);
+
+  // Helper to send Native Phone Notification + Vibration + In-App Banner
+  const dispatchTargetedPhoneAlert = useCallback((bus, win, isTest = false) => {
+    const title = isTest
+      ? `🔔 Test Alert: DIU Transport (${preferredStoppage || 'Your Area'})`
+      : `🚌 ${bus.bus_number} Seat Booking Open!`;
+    const body = isTest
+      ? `Phone alerts are active! You will ONLY be notified when a bus for ${preferredStoppage || 'your area'} opens booking 20 mins before campus departure.`
+      : `${bus.bus_number} leaves DIU Campus at ${win.departure12h} for ${preferredStoppage}. Book your seat now!`;
+
+    if (typeof window !== 'undefined') {
+      if ('vibrate' in navigator) {
+        try { navigator.vibrate([220, 100, 220]); } catch {}
+      }
+      playGentleChime();
+      if ('Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification(title, {
+            body,
+            tag: isTest ? 'diu-test' : `diu-bus-${bus.id}-${bus.departure_time}`,
+            renotify: true,
+          });
+        } catch {}
+      }
+    }
+
+    setLiveBookingAlert({
+      busId: bus?.id || null,
+      busNumber: bus?.bus_number || 'DIU Bus',
+      departure12h: win?.departure12h || '',
+      title,
+      body,
+      isTest,
+    });
+  }, [preferredStoppage]);
+
+  // TARGETED NOTIFICATION WATCHER:
+  // Monitors ONLY buses passing `preferredStoppage` that are leaving DIU Campus (`from_campus`).
+  // The exact moment the 20-minute window opens, alerts the student's phone ONCE!
+  useEffect(() => {
+    if (!alertsEnabled || !preferredStoppage || myAreaBuses.length === 0) return;
+
+    for (const bus of myAreaBuses) {
+      if ((bus.trip_direction || 'from_campus') !== 'from_campus') continue;
+      const win = evaluateBusBookingWindow(bus);
+      if (win.state !== 'open_now') continue;
+
+      const dedupeKey = `diu_alerted_${today}_${bus.id}_${bus.departure_time || 'def'}`;
+      if (alertedKeysRef.current.has(dedupeKey)) continue;
+      try {
+        if (localStorage.getItem(dedupeKey) === '1') {
+          alertedKeysRef.current.add(dedupeKey);
+          continue;
+        }
+        localStorage.setItem(dedupeKey, '1');
+      } catch {}
+      alertedKeysRef.current.add(dedupeKey);
+
+      dispatchTargetedPhoneAlert(bus, win, false);
+      break;
+    }
+  }, [tick, alertsEnabled, preferredStoppage, myAreaBuses, today, dispatchTargetedPhoneAlert]);
+
+  const handleSaveAreaPreference = async (newStoppage, nextAlertsEnabled = alertsEnabled) => {
+    setPreferredStoppage(newStoppage);
+    setAlertsEnabled(nextAlertsEnabled);
+    try { localStorage.setItem('diu_pref_stoppage_v42', newStoppage); } catch {}
+
+    setSavingArea(true);
+    const { user: updatedUser, error } = await db.updateStudentPreferences({
+      preferred_stoppage: newStoppage,
+      notifications_enabled: nextAlertsEnabled,
+    });
+    setSavingArea(false);
+
+    if (updatedUser) setUser(updatedUser);
+    if (error) {
+      showToast(`⚠️ Saved locally (${error})`);
+    } else if (newStoppage) {
+      showToast(`📍 Saved "${newStoppage}"! You will ONLY get alerts for buses passing ${newStoppage}.`);
+      // Auto-select first bus serving their chosen area for instant convenience
+      const firstMatch = buses.find((b) => busServesStoppage(b, routes, newStoppage));
+      if (firstMatch) setSelectedBusId(firstMatch.id);
+    }
+  };
+
+  const handleEnablePhoneNotifications = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      await handleSaveAreaPreference(preferredStoppage, !alertsEnabled);
+      showToast('In-app sound & vibration alerts updated for your area.');
+      return;
+    }
+
+    if (Notification.permission === 'default') {
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm);
+      if (perm === 'granted') {
+        await handleSaveAreaPreference(preferredStoppage, true);
+        showToast(`🔔 Phone notifications enabled for ${preferredStoppage || 'your selected area'}!`);
+      } else {
+        showToast('Browser notification permission blocked — in-app alert banner will still notify you.');
+      }
+      return;
+    }
+
+    const next = !alertsEnabled;
+    await handleSaveAreaPreference(preferredStoppage, next);
+    showToast(next ? `🔔 Alerts ON for ${preferredStoppage || 'your area'}` : '🔕 Booking alerts paused.');
+  };
+
   const selectedBus = buses.find((b) => Number(b.id) === Number(selectedBusId)) || buses[0] || null;
   const selectedRoute = selectedBus
     ? routes.find((r) => Number(r.id) === Number(selectedBus.route_id))
@@ -95,27 +264,35 @@ export default function StudentDashboard() {
     ? drivers.find((d) => Number(d.id) === Number(selectedBus.driver_id))
     : null;
 
+  // Re-evaluate 20-min booking window every second for live countdown & auto-unlock
+  const bookingWindow = useMemo(
+    () => evaluateBusBookingWindow(selectedBus),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedBus, tick]
+  );
+
   const schedules = Array.isArray(selectedRoute?.schedules) && selectedRoute.schedules.length > 0
     ? selectedRoute.schedules
-    : ['07:30 AM', '01:30 PM', '04:30 PM'];
+    : ['07:30 AM', '02:20 PM', '04:30 PM'];
+
+  // For `from_campus` buses, bind active trip slot to the Controller's fixed departure time
+  const activeScheduleSlot =
+    bookingWindow.isCampusDeparture && selectedBus?.departure_time
+      ? formatHHMMTo12h(selectedBus.departure_time)
+      : selectedTime;
 
   useEffect(() => {
-    if (schedules.length > 0 && !schedules.includes(selectedTime)) {
+    if (!bookingWindow.isCampusDeparture && schedules.length > 0 && !schedules.includes(selectedTime)) {
       setSelectedTime(schedules[0]);
     }
-  }, [selectedBus?.id, selectedRoute?.id]);
+  }, [selectedBus?.id, selectedRoute?.id, bookingWindow.isCampusDeparture]);
 
   const currentSlotBookings = bookings.filter(
-    (b) => Number(b.bus_id) === Number(selectedBus?.id) && b.schedule_time === selectedTime
+    (b) => Number(b.bus_id) === Number(selectedBus?.id) && b.schedule_time === activeScheduleSlot
   );
   const myBooking = currentSlotBookings.find((b) => Number(b.student_id) === Number(user?.id));
   const bookedSeatNumbers = currentSlotBookings.map((b) => Number(b.seat_number));
   const { cfg: activeSeatCfg, totalSeats } = computeBusCapacity(selectedBus?.seat_config);
-
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(''), 4500);
-  };
 
   const handleBookSeat = async (seatNum) => {
     if (!user || !selectedBus) return;
@@ -124,7 +301,11 @@ export default function StudentDashboard() {
       return;
     }
 
-    // Zero-Trust Client + Server Gender Enforcement
+    if (!bookingWindow.canBook) {
+      showToast(`🔒 ${bookingWindow.detail}`);
+      return;
+    }
+
     const femaleSet = new Set((activeSeatCfg.femaleSeats || []).map(Number));
     const maleSet = new Set((activeSeatCfg.maleSeats || []).map(Number));
     const userGender = String(user.gender || '').toLowerCase();
@@ -143,7 +324,7 @@ export default function StudentDashboard() {
     const { error } = await db.bookSeat({
       bus_id: selectedBus.id,
       route_id: selectedBus.route_id,
-      schedule_time: selectedTime,
+      schedule_time: activeScheduleSlot,
       seat_number: seatNum,
       booking_date: today,
     });
@@ -152,7 +333,7 @@ export default function StudentDashboard() {
       await loadData();
       return;
     }
-    showToast(`✅ Confirmed! Seat #${seatNum} booked on ${selectedBus.bus_number}.`);
+    showToast(`✅ Confirmed! Seat #${seatNum} booked on ${selectedBus.bus_number} (${activeScheduleSlot}).`);
     await loadData();
   };
 
@@ -184,7 +365,6 @@ export default function StudentDashboard() {
       lng: selectedBus?.current_lng || 90.3202,
       status: 'active',
     });
-    await db.logAudit(user, 'SOS_TRIGGERED', `Student ${user.name} sent SOS (${sosCategory}) on ${selectedBus?.bus_number}.`);
     setSosSending(false);
     setSosOpen(false);
     setSosMessage('');
@@ -225,7 +405,9 @@ export default function StudentDashboard() {
                   </span>
                 )}
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">{user.email}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {user.email} • BD Time: <span className="font-mono font-bold">{nowClock}</span>
+              </p>
             </div>
           </div>
 
@@ -251,6 +433,38 @@ export default function StudentDashboard() {
           </div>
         </header>
 
+        {/* TARGETED LIVE BOOKING OPEN PHONE ALERT BANNER */}
+        {liveBookingAlert && (
+          <div className="rounded-2xl bg-emerald-600 text-white p-4 shadow-xl flex flex-wrap items-center justify-between gap-3 border-2 border-emerald-300">
+            <div className="flex items-start gap-3">
+              <BellRing className="w-6 h-6 shrink-0 animate-bounce mt-0.5" />
+              <div className="text-xs space-y-0.5">
+                <div className="font-extrabold text-sm">{liveBookingAlert.title}</div>
+                <div className="opacity-95">{liveBookingAlert.body}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {liveBookingAlert.busId && (
+                <button
+                  onClick={() => {
+                    setSelectedBusId(liveBookingAlert.busId);
+                    setLiveBookingAlert(null);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-white text-emerald-700 text-xs font-extrabold cursor-pointer"
+                >
+                  Book Seat Now
+                </button>
+              )}
+              <button
+                onClick={() => setLiveBookingAlert(null)}
+                className="px-3 py-2 rounded-xl bg-emerald-800/70 text-white text-xs font-bold cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Live Notice */}
         {notices[0] && (
           <div className={`glass-card px-4 py-3 flex items-start gap-3 border-l-4 ${
@@ -270,27 +484,149 @@ export default function StudentDashboard() {
           </div>
         )}
 
-        {/* Step 1: Bus Selector */}
+        {/* NEW SECTION: MY AREA / STOPPAGE & TARGETED BUS ALERTS */}
+        <section className="glass-panel p-4 sm:p-5 space-y-3.5 border border-white/80 dark:border-white/15">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-extrabold text-slate-800 dark:text-white flex items-center gap-2">
+                <Navigation className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                My Stoppage & Targeted Bus Notifications
+              </h2>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                Select your area once. See which bus passes your stoppage and receive phone notifications ONLY when your bus&apos;s 20-minute campus departure booking opens.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={preferredStoppage}
+                disabled={savingArea}
+                onChange={(e) => handleSaveAreaPreference(e.target.value, alertsEnabled)}
+                className="glass-input px-3 py-2 text-xs font-bold min-w-[190px]"
+              >
+                <option value="">-- Select Your Area / Stoppage --</option>
+                {allStoppages.map((stop) => (
+                  <option key={stop} value={stop}>{stop}</option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={handleEnablePhoneNotifications}
+                className={`px-3.5 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-all ${
+                  alertsEnabled
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'glass-btn text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                {alertsEnabled ? <BellRing className="w-3.5 h-3.5" /> : <BellOff className="w-3.5 h-3.5" />}
+                {alertsEnabled
+                  ? notifPermission === 'granted' ? 'Phone Alerts ON' : 'Enable Phone Alert'
+                  : 'Alerts Paused'}
+              </button>
+
+              {preferredStoppage && (
+                <button
+                  type="button"
+                  onClick={() => dispatchTargetedPhoneAlert(myAreaBuses[0] || selectedBus, { departure12h: '03:00 PM' }, true)}
+                  className="glass-btn px-3 py-2 rounded-xl text-[11px] font-bold text-slate-700 dark:text-slate-200 cursor-pointer flex items-center gap-1"
+                  title="Send a test alert to your phone"
+                >
+                  <Bell className="w-3.5 h-3.5" /> Test Alert
+                </button>
+              )}
+            </div>
+          </div>
+
+          {preferredStoppage ? (
+            <div className="pt-2 border-t border-slate-300/40 dark:border-slate-700/50">
+              <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-2 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                Buses Passing <b className="text-slate-800 dark:text-white">{preferredStoppage}</b> ({myAreaBuses.length} Found — Only These Buses Will Notify You):
+              </div>
+
+              {myAreaBuses.length === 0 ? (
+                <div className="text-xs text-slate-500">No buses currently assigned to {preferredStoppage}.</div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                  {myAreaBuses.map((b) => {
+                    const rt = routes.find((r) => Number(r.id) === Number(b.route_id));
+                    const w = evaluateBusBookingWindow(b);
+                    const isSelected = Number(selectedBus?.id) === Number(b.id);
+                    return (
+                      <button
+                        key={b.id}
+                        type="button"
+                        onClick={() => setSelectedBusId(b.id)}
+                        className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex items-center justify-between gap-2 ${
+                          isSelected
+                            ? 'bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-800'
+                            : 'bg-white/65 dark:bg-slate-800/65 border-white/80 dark:border-white/10 hover:bg-white/90'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-extrabold flex items-center gap-1.5">
+                            <span>🚌 {b.bus_number}</span>
+                            <span className={`w-2 h-2 rounded-full ${b.status === 'active' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                          </div>
+                          <div className={`text-[10px] truncate mt-0.5 ${isSelected ? 'opacity-85' : 'text-slate-500'}`}>
+                            {rt?.name} • {b.status === 'active' ? `${b.speed_kmh || 0} km/h` : 'Standby'}
+                          </div>
+                        </div>
+                        <span className={`shrink-0 px-2 py-1 rounded-lg text-[10px] font-extrabold ${
+                          !w.isCampusDeparture
+                            ? 'bg-sky-500/20 text-sky-700 dark:text-sky-300'
+                            : w.state === 'open_now'
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-amber-500/20 text-amber-800 dark:text-amber-300'
+                        }`}>
+                          {!w.isCampusDeparture
+                            ? 'To DIU • Track'
+                            : w.state === 'open_now'
+                            ? 'Booking OPEN'
+                            : w.label}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300 bg-amber-500/10 border border-amber-500/25 rounded-xl px-3.5 py-2">
+              👆 Choose your area/stoppage above to filter which bus numbers pass near you and enable automatic phone alerts when booking opens!
+            </div>
+          )}
+        </section>
+
+        {/* Step 1: All Fleet Bus Selector */}
         <section className="glass-card p-4 sm:p-5">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h2 className="text-sm font-extrabold text-slate-800 dark:text-white flex items-center gap-2">
-              <Bus className="w-4 h-4" /> 1. Select Bus & Schedule
+              <Bus className="w-4 h-4" /> 1. All University Buses & Schedule
             </h2>
-            <div className="flex flex-wrap gap-1.5">
-              {schedules.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setSelectedTime(t)}
-                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    selectedTime === t
-                      ? 'bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900'
-                      : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300'
-                  }`}
-                >
-                  <Clock className="w-3 h-3 inline mr-1" />{t}
-                </button>
-              ))}
-            </div>
+            {!bookingWindow.isCampusDeparture ? (
+              <div className="flex flex-wrap gap-1.5">
+                {schedules.map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setSelectedTime(t)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      selectedTime === t
+                        ? 'bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900'
+                        : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    <Clock className="w-3 h-3 inline mr-1" />{t}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="px-3 py-1 rounded-lg text-xs font-extrabold bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900">
+                <Clock className="w-3 h-3 inline mr-1" />
+                Fixed Campus Departure: {bookingWindow.departure12h}
+              </span>
+            )}
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -298,26 +634,38 @@ export default function StudentDashboard() {
               const r = routes.find((rt) => Number(rt.id) === Number(bus.route_id));
               const active = Number(selectedBus?.id) === Number(bus.id);
               const { totalSeats: cap, cfg: bCfg } = computeBusCapacity(bus.seat_config);
+              const bw = evaluateBusBookingWindow(bus);
+              const matchesArea = preferredStoppage && busServesStoppage(bus, routes, preferredStoppage);
+
               return (
                 <button
                   key={bus.id}
                   onClick={() => setSelectedBusId(bus.id)}
-                  className={`p-3.5 rounded-2xl text-left transition-all cursor-pointer border ${
+                  className={`p-3.5 rounded-2xl text-left transition-all cursor-pointer border relative ${
                     active
                       ? 'bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-white shadow-lg'
                       : 'bg-white/55 dark:bg-slate-800/55 border-white/70 dark:border-white/10 text-slate-800 dark:text-slate-100 hover:bg-white/80 dark:hover:bg-slate-800/80'
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-extrabold text-sm">{bus.bus_number}</span>
-                    <span className={`w-2.5 h-2.5 rounded-full ${bus.status === 'active' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-extrabold text-sm flex items-center gap-1">
+                      {bus.bus_number}
+                      {matchesArea && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500 text-white font-extrabold">
+                          YOUR AREA
+                        </span>
+                      )}
+                    </span>
+                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${bus.status === 'active' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
                   </div>
                   <div className={`text-[11px] font-semibold mt-1 truncate ${active ? 'opacity-90' : 'text-slate-500 dark:text-slate-400'}`}>
                     {r?.name || 'Route Unassigned'}
                   </div>
-                  <div className={`text-[10px] mt-1.5 flex items-center justify-between ${active ? 'opacity-80' : 'text-slate-400'}`}>
+                  <div className={`text-[10px] mt-1.5 flex items-center justify-between ${active ? 'opacity-85' : 'text-slate-400'}`}>
                     <span>{cap} Seats {bCfg.femaleSeats.length > 0 ? '• F-Zone' : ''}</span>
-                    <span>{bus.status === 'active' ? `${bus.speed_kmh || 0} km/h` : 'Standby'}</span>
+                    <span className="font-bold">
+                      {bw.isCampusDeparture ? `Dep ${bw.departure12h}` : 'To DIU'}
+                    </span>
                   </div>
                 </button>
               );
@@ -362,15 +710,25 @@ export default function StudentDashboard() {
                     Route Stoppages ({selectedRoute.stoppages.length})
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    {selectedRoute.stoppages.map((st, idx) => (
-                      <div key={idx} className="glass-card px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                        <span className="w-4 h-4 rounded-full bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 text-[9px] flex items-center justify-center font-bold">
-                          {idx + 1}
-                        </span>
-                        <span>{st.name}</span>
-                        <span className="text-[10px] text-slate-400">+{st.offset_min || 0}m</span>
-                      </div>
-                    ))}
+                    {selectedRoute.stoppages.map((st, idx) => {
+                      const isMine = preferredStoppage && st.name?.toLowerCase() === preferredStoppage.toLowerCase();
+                      return (
+                        <div
+                          key={idx}
+                          className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold flex items-center gap-1.5 border ${
+                            isMine
+                              ? 'bg-emerald-500/20 border-emerald-500 text-emerald-800 dark:text-emerald-200 font-extrabold'
+                              : 'glass-card text-slate-700 dark:text-slate-200'
+                          }`}
+                        >
+                          <span className="w-4 h-4 rounded-full bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 text-[9px] flex items-center justify-center font-bold">
+                            {idx + 1}
+                          </span>
+                          <span>{st.name}</span>
+                          <span className="text-[10px] opacity-70">+{st.offset_min || 0}m</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -404,7 +762,7 @@ export default function StudentDashboard() {
             </div>
           </div>
 
-          {/* Right: Seat Booking + QR Boarding Pass */}
+          {/* Right: 20-Min Window Status + Seat Booking + QR Boarding Pass */}
           <div className="lg:col-span-5 space-y-5">
             {myBooking && (
               <div className="glass-panel p-4 sm:p-5 border-2 border-emerald-500/40">
@@ -430,7 +788,7 @@ export default function StudentDashboard() {
                       {selectedBus?.bus_number} • Seat #{myBooking.seat_number}
                     </div>
                     <div className="text-slate-600 dark:text-slate-300">{user.name} ({user.uni_id})</div>
-                    <div className="text-[11px] text-slate-500">{selectedRoute?.name} • {selectedTime}</div>
+                    <div className="text-[11px] text-slate-500">{selectedRoute?.name} • {activeScheduleSlot}</div>
                     <div className="text-[10px] font-mono text-slate-400">Token: {myBooking.qr_token}</div>
                   </div>
                   <div className="w-20 h-20 shrink-0 rounded-xl bg-slate-900 text-white p-2 flex flex-col items-center justify-center">
@@ -441,17 +799,47 @@ export default function StudentDashboard() {
               </div>
             )}
 
-            <div className="glass-card p-4 sm:p-5">
-              <div className="flex items-center justify-between mb-3">
+            <div className="glass-card p-4 sm:p-5 space-y-3.5">
+              <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-sm font-extrabold text-slate-800 dark:text-white">
                     3. Seat Booking — {selectedBus?.bus_number}
                   </h2>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Trip: {selectedTime} • Available: {Math.max(0, totalSeats - bookedSeatNumbers.length)}/{totalSeats}
+                    Trip: {activeScheduleSlot} • Available: {Math.max(0, totalSeats - bookedSeatNumbers.length)}/{totalSeats}
                   </p>
                 </div>
               </div>
+
+              {/* 20-MINUTE CAMPUS DEPARTURE WINDOW STATUS BANNER */}
+              {bookingWindow.isCampusDeparture ? (
+                <div className={`p-3.5 rounded-2xl border text-xs space-y-1 ${
+                  bookingWindow.state === 'open_now'
+                    ? 'bg-emerald-500/12 border-emerald-500/45 text-emerald-800 dark:text-emerald-200'
+                    : bookingWindow.state === 'locked_before'
+                    ? 'bg-amber-500/12 border-amber-500/45 text-amber-900 dark:text-amber-200'
+                    : 'bg-slate-500/12 border-slate-400/40 text-slate-700 dark:text-slate-300'
+                }`}>
+                  <div className="font-extrabold flex items-center gap-1.5">
+                    {bookingWindow.state === 'open_now' ? (
+                      <Sparkles className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <Lock className="w-4 h-4 shrink-0" />
+                    )}
+                    <span>{bookingWindow.label}</span>
+                  </div>
+                  <div className="text-[11px] opacity-90">{bookingWindow.detail}</div>
+                </div>
+              ) : (
+                <div className="p-3 rounded-2xl bg-sky-500/10 border border-sky-500/35 text-sky-800 dark:text-sky-200 text-xs">
+                  <div className="font-extrabold flex items-center gap-1.5">
+                    <Navigation className="w-3.5 h-3.5" /> Coming to DIU Campus (Live Tracking Mode)
+                  </div>
+                  <div className="text-[11px] opacity-90 mt-0.5">
+                    20-minute departure lock applies only when buses depart DIU Campus. Track live bus location above.
+                  </div>
+                </div>
+              )}
 
               {selectedBus && (
                 <BusSeatLayout
@@ -460,6 +848,8 @@ export default function StudentDashboard() {
                   bookedSeats={bookedSeatNumbers}
                   mySeat={myBooking?.seat_number || null}
                   studentGender={String(user.gender || '').toLowerCase()}
+                  bookingLocked={!bookingWindow.canBook}
+                  lockMessage={bookingWindow.detail}
                   mode="book"
                   onSelectSeat={handleBookSeat}
                 />

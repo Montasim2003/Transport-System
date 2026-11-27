@@ -69,6 +69,8 @@ export default function BusSeatLayout({
   mySeat = null,
   studentGender = null, // 'male' | 'female' | null
   mode = 'book',        // 'book' | 'edit' | 'preview'
+  bookingLocked = false,
+  lockMessage = '',
   onSelectSeat,
   onEditSeatClick,
   busNumber = 'Bus-01',
@@ -174,14 +176,17 @@ export default function BusSeatLayout({
       tooltip = `Seat #${seatNum} is already booked`;
     }
 
+    const isWindowLocked = mode === 'book' && bookingLocked && !isMine;
+    const finalDisabled = mode !== 'book' || isBooked || blockedByGender || isWindowLocked;
+
     return (
       <button
         key={seatNum}
         type="button"
-        disabled={mode !== 'book' || isBooked || blockedByGender}
-        onClick={() => mode === 'book' && !isBooked && !blockedByGender && onSelectSeat && onSelectSeat(seatNum)}
-        title={tooltip}
-        className={`w-10 h-10 sm:w-11 sm:h-11 rounded-xl text-xs font-bold border transition-all flex flex-col items-center justify-center leading-none ${styleClass}`}
+        disabled={finalDisabled}
+        onClick={() => !finalDisabled && onSelectSeat && onSelectSeat(seatNum)}
+        title={isWindowLocked ? (lockMessage || 'Seat booking opens 20 minutes before campus departure') : tooltip}
+        className={`w-10 h-10 sm:w-11 sm:h-11 rounded-xl text-xs font-bold border transition-all flex flex-col items-center justify-center leading-none ${styleClass} ${isWindowLocked ? 'opacity-65 cursor-not-allowed' : ''}`}
       >
         {isMine ? (
           <UserCheck className="w-4 h-4" />
